@@ -13,17 +13,9 @@ import {
 
 import StockSearchBox from './StockSearchBox';
 
-// 有名銘柄リスト（マスターデータ）
-const STOCK_LIST = [
-  { name: "トヨタ自動車", code: "7203" },
-  { name: "ソニーグループ", code: "6758" },
-  { name: "ソフトバンクグループ", code: "9984" },
-  { name: "任天堂", code: "7974" },
-  { name: "ファーストリテイリング", code: "9983" }
-];
 
 export default function StockDashboard() {
-  const [selectedCode, setSelectedCode] = useState<string>(STOCK_LIST[0].code);
+  const [selectedCode, setSelectedCode] = useState<string>("7203"); // 初期値はトヨタ自動車(7203)
   const [stockData, setStockData] = useState<any[]>([]);
   const [loading, setLoading] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
