@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import { useState, useEffect } from 'react';
 import {
   LineChart,
   Line,
@@ -10,6 +10,8 @@ import {
   BarChart,
   Bar
 } from 'recharts';
+
+import StockSearchBox from './StockSearchBox';
 
 // 有名銘柄リスト（マスターデータ）
 const STOCK_LIST = [
@@ -56,26 +58,19 @@ export default function StockDashboard() {
 
   return (
     <div style={{ padding: '20px', maxWidth: '1000px', margin: '0 auto', fontFamily: 'sans-serif' }}>
-      <h1 style={{ borderBottom: '2px solid #eee', paddingBottom: '10px' }}>株価分析ダッシュボード</h1>
+      <h1 style={{ borderBottom: '2px solid #eee', paddingBottom: '10px' }}>株価分析ダッシュボード (v2.0 - Search Enabled)</h1>
       
       {/* 操作パネルエリア */}
       <div style={{ display: 'flex', gap: '20px', flexWrap: 'wrap', margin: '20px 0', padding: '15px', backgroundColor: '#f8f9fa', borderRadius: '8px' }}>
-        <div>
-          <label htmlFor="stock-select" style={{ marginRight: '10px', fontWeight: 'bold' }}>
-            銘柄を選択:
-          </label>
-          <select 
-            id="stock-select"
-            value={selectedCode} 
-            onChange={(e) => setSelectedCode(e.target.value)}
-            style={{ padding: '8px', fontSize: '16px', borderRadius: '4px' }}
-          >
-            {STOCK_LIST.map((stock) => (
-              <option key={stock.code} value={stock.code}>
-                {stock.name} ({stock.code})
-              </option>
-            ))}
-          </select>
+        <div style={{ display: 'flex', alignItems: 'center' }}>
+          <label style={{ marginRight: '10px', fontWeight: 'bold' }}>銘柄検索:</label>
+          
+          {/* ここにオートコンプリートを配置 */}
+          <StockSearchBox 
+            initialCode={selectedCode}
+            onSelect={(code) => setSelectedCode(code)} 
+          />
+          
         </div>
 
         {/* 指標のトグルスイッチ */}
