@@ -2,6 +2,8 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 import yfinance as yf
 
+import pandas as pd
+
 app = FastAPI()
 
 # ---------------------------------------------------------
@@ -37,23 +39,53 @@ def get_stock_data(code: str):
         # yfinanceでデータを取得
         ticker = yf.Ticker(ticker_symbol)
         
-        # 過去3ヶ月分の日足データを取得（期間は変更可能: 1mo, 3mo, 1y など）
-        hist = ticker.history(period="3mo")
+        # 過去半年（6mo）のデータを取得（指標計算のため多めに取得）
+        hist = ticker.history(period="6mo")
 
-        # データが存在しない場合の処理
         if hist.empty:
              raise HTTPException(status_code=404, detail="指定された銘柄のデータが見つかりませんでした")
 
-        # フロントエンドで使いやすいJSON形式（配列）に整形
+        # ---------------------------------------------------------
+        # 指標の計算 (Pandasを利用)
+        # ---------------------------------------------------------
+        # 1. 単純移動平均線（SMA: Simple Moving Average）
+        hist['SMA_5'] = hist['Close'].rolling(window=5).mean()
+        hist['SMA_25'] = hist['Close'].rolling(window=25).mean()
+
+        # 2. ボリンジャーバンド (25日, ±2σ)
+        std_25 = hist['Close'].rolling(window=25).std()
+        hist['BB_Upper'] = hist['SMA_25'] + (std_25 * 2)
+        hist['BB_Lower'] = hist['SMA_25'] - (std_25 * 2)
+
+        # ---------------------------------------------------------
+        # フロントエンド向けにデータ整形
+        # ---------------------------------------------------------
+        # 直近約3ヶ月（60営業日）分に絞る
+        hist = hist.tail(60)
+
+        # NaNをNoneに変換してJSONエラーを防ぐ
+        hist = hist.where((pd.notna(hist)), None)
+
         data = []
         for index, row in hist.iterrows():
+            def clean_val(val):
+                # NaN または None の場合は None を返す
+                if pd.isna(val):
+                    return None
+                return round(float(val), 1)
+
             data.append({
-                "date": index.strftime('%Y-%m-%d'), # 日付を文字列に変換
-                "open": round(row['Open'], 1),
-                "high": round(row['High'], 1),
-                "low": round(row['Low'], 1),
-                "close": round(row['Close'], 1),
-                "volume": int(row['Volume'])
+                "date": index.strftime('%Y-%m-%d'),
+                "open": clean_val(row['Open']),
+                "high": clean_val(row['High']),
+                "low": clean_val(row['Low']),
+                "close": clean_val(row['Close']),
+                "volume": int(row['Volume']) if not pd.isna(row['Volume']) else 0,
+                # 追加指標
+                "sma5": clean_val(row['SMA_5']),
+                "sma25": clean_val(row['SMA_25']),
+                "bbUpper": clean_val(row['BB_Upper']),
+                "bbLower": clean_val(row['BB_Lower']),
             })
 
         return data
