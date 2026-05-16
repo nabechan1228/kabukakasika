@@ -51,7 +51,7 @@ def read_root():
 # ---------------------------------------------------------
 @app.get("/api/stock/{code}")
 def get_stock_data(code: str):
-    if not code.isdigit() or len(code) != 4:
+    if not code.isalnum() or len(code) != 4:
         raise HTTPException(status_code=400, detail="銘柄コードは4桁の数字で入力してください")
 
     db = SessionLocal()
