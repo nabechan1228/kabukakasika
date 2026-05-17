@@ -10,26 +10,34 @@ interface StockSearchBoxProps {
 export default function StockSearchBox({ onSelect, initialCode }: StockSearchBoxProps) {
   const [query, setQuery] = useState('');
   const [isOpen, setIsOpen] = useState(false);
+  const [selectedStock, setSelectedStock] = useState<{ code: string; name: string } | null>(null);
   const wrapperRef = useRef<HTMLDivElement>(null);
 
   // 初期値のセット
   useEffect(() => {
     if (initialCode) {
       const stock = stockMaster.find(s => s.code === initialCode);
-      if (stock) setQuery(`${stock.name} (${stock.code})`);
+      if (stock) {
+        setSelectedStock(stock);
+        setQuery(`${stock.name} (${stock.code})`);
+      }
     }
   }, [initialCode]);
 
   // ▼ 高速フィルタリング処理 (useMemoで入力のたびに再計算)
   const filteredStocks = useMemo(() => {
-    if (!query) return stockMaster.slice(0, 50); // 未入力時は最初の50件
+    const selectedText = selectedStock ? `${selectedStock.name} (${selectedStock.code})` : '';
+    // 未入力、または現在選択されている銘柄の表示テキストと完全に一致している場合は全件表示（最初の50件）
+    if (!query || query === selectedText) {
+      return stockMaster.slice(0, 50);
+    }
     
     const lowerQuery = query.toLowerCase();
     return stockMaster.filter(stock => 
       stock.name.toLowerCase().includes(lowerQuery) || 
       stock.code.includes(lowerQuery)
     ).slice(0, 50); // DOMの過負荷を防ぐため最大50件に制限
-  }, [query]);
+  }, [query, selectedStock]);
 
   // ▼ 画面外クリックでドロップダウンを閉じる処理
   useEffect(() => {
@@ -43,6 +51,7 @@ export default function StockSearchBox({ onSelect, initialCode }: StockSearchBox
   }, []);
 
   const handleSelect = (code: string, name: string) => {
+    setSelectedStock({ code, name });
     setQuery(`${name} (${code})`); // 選択した銘柄を入力欄に反映
     setIsOpen(false);
     onSelect(code); // 親コンポーネントに選択されたコードを渡す
@@ -57,15 +66,22 @@ export default function StockSearchBox({ onSelect, initialCode }: StockSearchBox
           setQuery(e.target.value);
           setIsOpen(true);
         }}
-        onFocus={() => setIsOpen(true)}
+        onFocus={(e) => {
+          setIsOpen(true);
+          e.target.select(); // フォーカス時にテキストを全選択する（上書き入力しやすくするため）
+        }}
+        onClick={(e) => {
+          (e.target as HTMLInputElement).select(); // クリック時にも全選択する
+        }}
         placeholder="銘柄名またはコード (例: ソニー, 6758)"
         style={{
           width: '100%',
           padding: '10px',
           fontSize: '16px',
           borderRadius: '4px',
-          border: '2px solid red', // デバッグ用に赤枠を追加
-          boxSizing: 'border-box'
+          border: '1px solid #ccc',
+          boxSizing: 'border-box',
+          outline: 'none'
         }}
       />
       
@@ -105,7 +121,7 @@ export default function StockSearchBox({ onSelect, initialCode }: StockSearchBox
           ))}
         </ul>
       )}
-      {isOpen && query && filteredStocks.length === 0 && (
+      {isOpen && query && query !== (selectedStock ? `${selectedStock.name} (${selectedStock.code})` : '') && filteredStocks.length === 0 && (
         <div style={{ position: 'absolute', top: '100%', left: 0, right: 0, padding: '10px', background: 'white', border: '1px solid #ccc', zIndex: 1000 }}>
           見つかりませんでした
         </div>
