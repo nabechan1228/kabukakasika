@@ -125,6 +125,19 @@ def get_stock_data(code: str):
         df['BB_Upper'] = df['SMA_25'] + (std_25 * 2)
         df['BB_Lower'] = df['SMA_25'] - (std_25 * 2)
 
+        # RSI (14日)
+        delta = df['Close'].diff()
+        gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+        rs = gain / loss
+        df['RSI'] = 100 - (100 / (1 + rs))
+
+        # MACD (12, 26, 9)
+        exp1 = df['Close'].ewm(span=12, adjust=False).mean()
+        exp2 = df['Close'].ewm(span=26, adjust=False).mean()
+        df['MACD'] = exp1 - exp2
+        df['Signal_Line'] = df['MACD'].ewm(span=9, adjust=False).mean()
+
         # 直近60日分に絞る
         df = df.tail(60)
         df = df.where((pd.notna(df)), None)
@@ -146,6 +159,9 @@ def get_stock_data(code: str):
                 "sma25": clean_val(row['SMA_25']),
                 "bbUpper": clean_val(row['BB_Upper']),
                 "bbLower": clean_val(row['BB_Lower']),
+                "rsi": clean_val(row['RSI']),
+                "macd": clean_val(row['MACD']),
+                "macdSignal": clean_val(row['Signal_Line']),
             })
 
         return data
@@ -312,6 +328,27 @@ def train_stock_model(code: str):
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         db.close()
+
+@app.get("/api/info/{code}")
+def get_stock_info(code: str):
+    if not code.isalnum() or len(code) != 4:
+        raise HTTPException(status_code=400, detail="銘柄コードが不正です")
+    try:
+        ticker = yf.Ticker(f"{code}.T")
+        info = ticker.info
+        return {
+            "code": code,
+            "name": info.get("longName") or info.get("shortName") or "不明",
+            "marketCap": info.get("marketCap"),
+            "trailingPE": info.get("trailingPE"),
+            "priceToBook": info.get("priceToBook"),
+            "dividendYield": info.get("dividendYield"),
+            "fiftyTwoWeekHigh": info.get("fiftyTwoWeekHigh"),
+            "fiftyTwoWeekLow": info.get("fiftyTwoWeekLow"),
+            "previousClose": info.get("previousClose")
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":
     import uvicorn

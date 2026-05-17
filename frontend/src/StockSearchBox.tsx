@@ -76,12 +76,26 @@ export default function StockSearchBox({ onSelect, initialCode }: StockSearchBox
         placeholder="銘柄名またはコード (例: ソニー, 6758)"
         style={{
           width: '100%',
-          padding: '10px',
+          padding: '10px 15px',
           fontSize: '16px',
-          borderRadius: '4px',
-          border: '1px solid #ccc',
+          borderRadius: '8px',
+          border: '1px solid var(--border-color)',
+          backgroundColor: 'rgba(15, 23, 42, 0.6)',
+          color: 'var(--text-main)',
           boxSizing: 'border-box',
-          outline: 'none'
+          outline: 'none',
+          boxShadow: '0 4px 6px rgba(0,0,0,0.3)',
+          transition: 'all 0.3s ease'
+        }}
+        onFocus={(e) => {
+          setIsOpen(true);
+          e.target.select();
+          e.target.style.border = '1px solid var(--accent-cyan)';
+          e.target.style.boxShadow = '0 0 10px rgba(6, 182, 212, 0.5)';
+        }}
+        onBlur={(e) => {
+          e.target.style.border = '1px solid var(--border-color)';
+          e.target.style.boxShadow = '0 4px 6px rgba(0,0,0,0.3)';
         }}
       />
       
@@ -89,40 +103,42 @@ export default function StockSearchBox({ onSelect, initialCode }: StockSearchBox
       {isOpen && filteredStocks.length > 0 && (
         <ul style={{
           position: 'absolute',
-          top: '100%',
+          top: 'calc(100% + 5px)',
           left: 0,
           right: 0,
           margin: 0,
           padding: 0,
           listStyle: 'none',
-          backgroundColor: 'white',
-          border: '1px solid #ccc',
-          borderTop: 'none',
-          borderRadius: '0 0 4px 4px',
+          backgroundColor: 'var(--bg-dark)',
+          border: '1px solid var(--border-color)',
+          borderRadius: '8px',
           maxHeight: '300px',
           overflowY: 'auto',
           zIndex: 1000,
-          boxShadow: '0 4px 6px rgba(0,0,0,0.1)'
+          boxShadow: '0 10px 15px -3px rgba(0,0,0,0.5)',
+          backdropFilter: 'blur(10px)'
         }}>
           {filteredStocks.map((stock) => (
             <li
               key={stock.code}
               onClick={() => handleSelect(stock.code, stock.name)}
               style={{
-                padding: '10px',
+                padding: '10px 15px',
                 cursor: 'pointer',
-                borderBottom: '1px solid #eee'
+                borderBottom: '1px solid var(--border-color)',
+                color: 'var(--text-main)',
+                transition: 'background-color 0.2s'
               }}
-              onMouseEnter={(e) => e.currentTarget.style.backgroundColor = '#f0f8ff'}
-              onMouseLeave={(e) => e.currentTarget.style.backgroundColor = 'white'}
+              onMouseEnter={(e) => e.currentTarget.style.backgroundColor = 'rgba(255, 255, 255, 0.1)'}
+              onMouseLeave={(e) => e.currentTarget.style.backgroundColor = 'transparent'}
             >
-              <strong>{stock.name}</strong> <span style={{ color: '#666', fontSize: '0.9em' }}>({stock.code})</span>
+              <strong>{stock.name}</strong> <span style={{ color: 'var(--text-muted)', fontSize: '0.9em' }}>({stock.code})</span>
             </li>
           ))}
         </ul>
       )}
       {isOpen && query && query !== (selectedStock ? `${selectedStock.name} (${selectedStock.code})` : '') && filteredStocks.length === 0 && (
-        <div style={{ position: 'absolute', top: '100%', left: 0, right: 0, padding: '10px', background: 'white', border: '1px solid #ccc', zIndex: 1000 }}>
+        <div style={{ position: 'absolute', top: 'calc(100% + 5px)', left: 0, right: 0, padding: '10px', background: 'var(--bg-dark)', border: '1px solid var(--border-color)', zIndex: 1000, borderRadius: '8px', color: 'var(--text-muted)' }}>
           見つかりませんでした
         </div>
       )}
