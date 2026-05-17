@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import {
   LineChart,
   Line,
@@ -8,7 +8,9 @@ import {
   Tooltip,
   ResponsiveContainer,
   BarChart,
-  Bar
+  Bar,
+  ComposedChart,
+  Cell
 } from 'recharts';
 
 import StockSearchBox from './StockSearchBox';
@@ -21,6 +23,19 @@ export default function StockDashboard() {
   const [error, setError] = useState<string | null>(null);
   const [prediction, setPrediction] = useState<number | null>(null);
   const [training, setTraining] = useState<boolean>(false);
+  
+  // 表示形式（折れ線 / ローソク足）のステート
+  const [chartType, setChartType] = useState<'line' | 'candle'>('candle');
+
+  // ローソク足用のデータマッピング処理 (useMemoで高速化)
+  const chartData = useMemo(() => {
+    return stockData.map(item => ({
+      ...item,
+      lowHigh: [item.low, item.high],
+      openClose: [Math.min(item.open, item.close), Math.max(item.open, item.close)],
+      isUp: item.close >= item.open
+    }));
+  }, [stockData]);
 
   // 指標の表示/非表示を管理するステート
   const [showSMA5, setShowSMA5] = useState<boolean>(true);
@@ -100,6 +115,41 @@ export default function StockDashboard() {
           
         </div>
 
+        {/* 表示形式の選択トグル */}
+        <div style={{ display: 'flex', gap: '10px', alignItems: 'center', borderLeft: '1px solid #ddd', paddingLeft: '20px' }}>
+          <span style={{ fontWeight: 'bold' }}>表示形式:</span>
+          <button
+            onClick={() => setChartType('candle')}
+            style={{
+              padding: '6px 12px',
+              borderRadius: '4px',
+              border: chartType === 'candle' ? 'none' : '1px solid #ccc',
+              background: chartType === 'candle' ? 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)' : '#fff',
+              color: chartType === 'candle' ? '#fff' : '#333',
+              fontWeight: 'bold',
+              cursor: 'pointer',
+              fontSize: '13px'
+            }}
+          >
+            🕯️ ローソク足
+          </button>
+          <button
+            onClick={() => setChartType('line')}
+            style={{
+              padding: '6px 12px',
+              borderRadius: '4px',
+              border: chartType === 'line' ? 'none' : '1px solid #ccc',
+              background: chartType === 'line' ? 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)' : '#fff',
+              color: chartType === 'line' ? '#fff' : '#333',
+              fontWeight: 'bold',
+              cursor: 'pointer',
+              fontSize: '13px'
+            }}
+          >
+            📈 折れ線
+          </button>
+        </div>
+
         {/* 指標のトグルスイッチ */}
         <div style={{ display: 'flex', gap: '15px', alignItems: 'center', borderLeft: '1px solid #ddd', paddingLeft: '20px' }}>
           <span style={{ fontWeight: 'bold' }}>表示指標:</span>
@@ -173,16 +223,44 @@ export default function StockDashboard() {
           </div>
           <div style={{ height: '500px', width: '100%' }}>
             <ResponsiveContainer width="100%" height="100%">
-              <LineChart data={stockData} margin={{ top: 5, right: 20, bottom: 5, left: 0 }}>
+              <ComposedChart data={chartData} barGap="-100%" margin={{ top: 5, right: 20, bottom: 5, left: 0 }}>
                 <CartesianGrid strokeDasharray="3 3" vertical={false} />
                 <XAxis dataKey="date" tick={{fontSize: 12}} />
                 <YAxis domain={['auto', 'auto']} tick={{fontSize: 12}} />
-                <Tooltip />
                 
-                {/* 終値 (ベースライン) */}
-                <Line type="monotone" dataKey="close" stroke="#333333" strokeWidth={2} dot={false} name="終値" />
+                {/* 日本語対応された高品質なツールチップフォーマッター */}
+                <Tooltip formatter={(value, name, props) => {
+                  if (name === "高値・安値" && Array.isArray(value)) {
+                    return [`安値: ${value[0].toLocaleString()}円 / 高値: ${value[1].toLocaleString()}円`, name];
+                  }
+                  if (name === "始値・終値" && Array.isArray(value)) {
+                    const isUp = props.payload.isUp;
+                    return [`${isUp ? '陽線 (上昇)' : '陰線 (下落)'} (始値: ${props.payload.open.toLocaleString()}円 / 終値: ${props.payload.close.toLocaleString()}円)`, name];
+                  }
+                  if (typeof value === 'number') {
+                    return [`${value.toLocaleString()}円`, name];
+                  }
+                  return [value, name];
+                }} />
                 
-                {/* テクニカル指標 (チェックボックスに連動) */}
+                {/* 折れ線グラフ表示時 */}
+                {chartType === 'line' && (
+                  <Line type="monotone" dataKey="close" stroke="#333333" strokeWidth={2} dot={false} name="終値" />
+                )}
+
+                {/* ローソク足表示時 */}
+                {chartType === 'candle' && (
+                  <Bar dataKey="lowHigh" barSize={2} fill="#555555" name="高値・安値" />
+                )}
+                {chartType === 'candle' && (
+                  <Bar dataKey="openClose" barSize={10} name="始値・終値">
+                    {chartData.map((entry, index) => (
+                      <Cell key={`cell-${index}`} fill={entry.isUp ? '#ef4444' : '#06b6d4'} />
+                    ))}
+                  </Bar>
+                )}
+                
+                {/* テクニカル指標 (チェックボックスに連動して常に上からオーバーレイ) */}
                 {showSMA5 && (
                   <Line type="monotone" dataKey="sma5" stroke="#ff7300" strokeWidth={1.5} dot={false} name="5日SMA" />
                 )}
@@ -195,7 +273,7 @@ export default function StockDashboard() {
                 {showBB && (
                   <Line type="monotone" dataKey="bbLower" stroke="#cc00ff" strokeWidth={2} strokeDasharray="10 5" dot={false} name="-2σ" />
                 )}
-              </LineChart>
+              </ComposedChart>
             </ResponsiveContainer>
           </div>
 
