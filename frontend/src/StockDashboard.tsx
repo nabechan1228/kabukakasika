@@ -19,6 +19,8 @@ export default function StockDashboard() {
   const [stockData, setStockData] = useState<any[]>([]);
   const [loading, setLoading] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
+  const [prediction, setPrediction] = useState<number | null>(null);
+  const [training, setTraining] = useState<boolean>(false);
 
   // 指標の表示/非表示を管理するステート
   const [showSMA5, setShowSMA5] = useState<boolean>(true);
@@ -38,6 +40,19 @@ export default function StockDashboard() {
         }
         const data = await response.json();
         setStockData(data);
+
+        // --- 追加: AI予測データの取得 ---
+        try {
+          const predResponse = await fetch(`http://localhost:8000/api/predict/${selectedCode}`);
+          if (predResponse.ok) {
+            const predData = await predResponse.json();
+            setPrediction(predData.prediction);
+          } else {
+            setPrediction(null);
+          }
+        } catch (e) {
+          setPrediction(null);
+        }
       } catch (err: any) {
         setError(err.message);
       } finally {
@@ -47,6 +62,26 @@ export default function StockDashboard() {
 
     fetchStockData();
   }, [selectedCode]);
+
+  // --- 追加: AIモデルのオンデマンド学習処理 ---
+  const handleTrainModel = async () => {
+    setTraining(true);
+    setError(null);
+    try {
+      const response = await fetch(`http://localhost:8000/api/train/${selectedCode}`, {
+        method: 'POST'
+      });
+      if (!response.ok) {
+        throw new Error('AIの学習に失敗しました');
+      }
+      const data = await response.json();
+      setPrediction(data.prediction);
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setTraining(false);
+    }
+  };
 
   return (
     <div style={{ padding: '20px', maxWidth: '1000px', margin: '0 auto', fontFamily: 'sans-serif' }}>
@@ -87,7 +122,55 @@ export default function StockDashboard() {
       {/* チャート表示エリア */}
       {!loading && !error && stockData.length > 0 && (
         <div>
-          <h2 style={{ fontSize: '18px', marginTop: '30px' }}>株価推移・テクニカル指標</h2>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '30px', marginBottom: '10px' }}>
+            <h2 style={{ fontSize: '18px', margin: 0 }}>株価推移・テクニカル指標</h2>
+            
+            {/* AI予測の表示エリア (オンデマンド学習対応) */}
+            {prediction !== null ? (
+              <div style={{
+                background: 'linear-gradient(135deg, #e0c3fc 0%, #8ec5fc 100%)',
+                padding: '8px 16px',
+                borderRadius: '8px',
+                color: '#fff',
+                fontWeight: 'bold',
+                boxShadow: '0 2px 4px rgba(0,0,0,0.1)'
+              }}>
+                🤖 AI予測 (翌日終値): {Math.round(prediction).toLocaleString()} 円
+              </div>
+            ) : training ? (
+              <div style={{
+                background: 'linear-gradient(135deg, #fbc2eb 0%, #a6c1ee 100%)',
+                padding: '8px 16px',
+                borderRadius: '8px',
+                color: '#fff',
+                fontWeight: 'bold',
+                boxShadow: '0 2px 4px rgba(0,0,0,0.1)',
+                opacity: 0.8
+              }}>
+                ⚡ AI学習中... (約5秒)
+              </div>
+            ) : (
+              <button
+                onClick={handleTrainModel}
+                style={{
+                  background: 'linear-gradient(135deg, #84fab0 0%, #8fd3f4 100%)',
+                  border: 'none',
+                  padding: '8px 16px',
+                  borderRadius: '8px',
+                  color: '#fff',
+                  fontWeight: 'bold',
+                  cursor: 'pointer',
+                  boxShadow: '0 2px 4px rgba(0,0,0,0.1)',
+                  transition: 'transform 0.1s ease',
+                  outline: 'none'
+                }}
+                onMouseEnter={(e) => e.currentTarget.style.transform = 'scale(1.03)'}
+                onMouseLeave={(e) => e.currentTarget.style.transform = 'scale(1)'}
+              >
+                🤖 AI予測: 未学習 [学習を開始する]
+              </button>
+            )}
+          </div>
           <div style={{ height: '500px', width: '100%' }}>
             <ResponsiveContainer width="100%" height="100%">
               <LineChart data={stockData} margin={{ top: 5, right: 20, bottom: 5, left: 0 }}>

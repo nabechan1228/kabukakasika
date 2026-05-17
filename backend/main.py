@@ -5,6 +5,11 @@ import pandas as pd
 from sqlalchemy import create_engine, Column, String, Float, Integer
 from sqlalchemy.orm import declarative_base, sessionmaker
 import os
+import torch
+import torch.nn as nn
+import pickle
+import numpy as np
+from sklearn.preprocessing import MinMaxScaler
 
 # ---------------------------------------------------------
 # 1. データベースの初期設定 (SQLite x SQLAlchemy)
@@ -28,6 +33,22 @@ class StockPrice(Base):
 
 # 起動時にテーブルを作成
 Base.metadata.create_all(bind=engine)
+
+# ---------------------------------------------------------
+# 1.5. LSTMモデル定義
+# ---------------------------------------------------------
+class StockLSTM(nn.Module):
+    def __init__(self, input_size=1, hidden_size=50, num_layers=1, output_size=1):
+        super(StockLSTM, self).__init__()
+        self.hidden_size = hidden_size
+        self.num_layers = num_layers
+        self.lstm = nn.LSTM(input_size, hidden_size, num_layers, batch_first=True)
+        self.linear = nn.Linear(hidden_size, output_size)
+
+    def forward(self, x):
+        out, _ = self.lstm(x)
+        predictions = self.linear(out[:, -1, :])
+        return predictions
 
 # ---------------------------------------------------------
 # 2. FastAPI アプリケーション設定
@@ -131,6 +152,164 @@ def get_stock_data(code: str):
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"エラー: {str(e)}")
+    finally:
+        db.close()
+
+@app.get("/api/predict/{code}")
+def predict_stock(code: str):
+    if not code.isalnum() or len(code) != 4:
+        raise HTTPException(status_code=400, detail="銘柄コードが不正です")
+    
+    model_path = f"lstm_model_{code}.pth"
+    scaler_path = f"scaler_{code}.pkl"
+
+    if not os.path.exists(model_path) or not os.path.exists(scaler_path):
+        return {"code": code, "prediction": None, "message": "学習モデルがありません"}
+
+    db = SessionLocal()
+    try:
+        # 最新60件のデータを取得 (降順で取得して、後で昇順に戻す)
+        query = f"SELECT close FROM stock_prices WHERE code = '{code}' ORDER BY date DESC LIMIT 60"
+        df = pd.read_sql(query, con=engine)
+        if len(df) < 60:
+            return {"code": code, "prediction": None, "message": "予測に必要なデータ(60日分)が不足しています"}
+        
+        df = df.iloc[::-1].reset_index(drop=True)
+        prices = df['close'].values.reshape(-1, 1)
+
+        # スケーラー読み込み
+        with open(scaler_path, "rb") as f:
+            scaler = pickle.load(f)
+
+        # モデル読み込み
+        model = StockLSTM()
+        model.load_state_dict(torch.load(model_path, weights_only=True))
+        model.eval()
+
+        # データ前処理
+        scaled_prices = scaler.transform(prices)
+        X_tensor = torch.tensor(scaled_prices, dtype=torch.float32).unsqueeze(0)
+
+        # 予測
+        with torch.no_grad():
+            pred_scaled = model(X_tensor)
+        
+        # スケールを元に戻す
+        pred_actual = scaler.inverse_transform(pred_scaled.numpy())
+        predicted_price = float(pred_actual[0][0])
+
+        return {"code": code, "prediction": predicted_price, "message": "success"}
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        db.close()
+
+@app.post("/api/train/{code}")
+def train_stock_model(code: str):
+    if not code.isalnum() or len(code) != 4:
+        raise HTTPException(status_code=400, detail="銘柄コードが不正です")
+    
+    db = SessionLocal()
+    try:
+        # DBからデータを読み込む
+        query = f"SELECT date, close FROM stock_prices WHERE code = '{code}' ORDER BY date ASC"
+        df = pd.read_sql(query, con=engine)
+
+        # DBにデータがない、または不足している場合は yfinance から取得して保存
+        if df.empty or len(df) < 100:
+            print(f"[{code}] DBにデータが不足しているため、yfinanceから取得します...")
+            ticker_symbol = f"{code}.T"
+            ticker = yf.Ticker(ticker_symbol)
+            hist = ticker.history(period="1y")
+
+            if hist.empty:
+                raise HTTPException(status_code=404, detail="株価データが見つかりません")
+
+            # まとめてDBに保存
+            records = []
+            for index, row in hist.iterrows():
+                date_str = index.strftime('%Y-%m-%d')
+                records.append(
+                    StockPrice(
+                        code=code,
+                        date=date_str,
+                        open=round(row['Open'], 1),
+                        high=round(row['High'], 1),
+                        low=round(row['Low'], 1),
+                        close=round(row['Close'], 1),
+                        volume=int(row['Volume'])
+                    )
+                )
+            db.bulk_save_objects(records)
+            db.commit()
+            
+            # 再度読み込み
+            df = pd.read_sql(query, con=engine)
+
+        if len(df) < 100:
+            raise HTTPException(status_code=400, detail="学習に必要なデータ（最低100日分）が不足しています")
+
+        prices = df['close'].values.reshape(-1, 1)
+
+        # 正規化
+        scaler = MinMaxScaler(feature_range=(0, 1))
+        scaled_prices = scaler.fit_transform(prices)
+
+        # スケーラー保存
+        scaler_path = f"scaler_{code}.pkl"
+        with open(scaler_path, "wb") as f:
+            pickle.dump(scaler, f)
+
+        # シーケンスデータの作成 (過去60日 -> 翌日)
+        SEQ_LENGTH = 60
+        xs, ys = [], []
+        for i in range(len(scaled_prices) - SEQ_LENGTH):
+            xs.append(scaled_prices[i:(i + SEQ_LENGTH)])
+            ys.append(scaled_prices[i + SEQ_LENGTH])
+        X = np.array(xs)
+        y = np.array(ys)
+
+        X_tensor = torch.tensor(X, dtype=torch.float32)
+        y_tensor = torch.tensor(y, dtype=torch.float32)
+
+        # LSTMモデル構築
+        model = StockLSTM()
+        criterion = nn.MSELoss()
+        optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+
+        # オンデマンドでのレスポンス速度向上のため、高速学習エポック数（40）に設定
+        EPOCHS = 40
+        model.train()
+        for epoch in range(EPOCHS):
+            optimizer.zero_grad()
+            outputs = model(X_tensor)
+            loss = criterion(outputs, y_tensor)
+            loss.backward()
+            optimizer.step()
+
+        # モデル保存
+        model_path = f"lstm_model_{code}.pth"
+        torch.save(model.state_dict(), model_path)
+
+        # 予測
+        model.eval()
+        last_60_scaled = scaled_prices[-SEQ_LENGTH:]
+        X_pred_tensor = torch.tensor(last_60_scaled, dtype=torch.float32).unsqueeze(0)
+        with torch.no_grad():
+            pred_scaled = model(X_pred_tensor)
+        
+        pred_actual = scaler.inverse_transform(pred_scaled.numpy())
+        predicted_price = float(pred_actual[0][0])
+
+        return {
+            "code": code,
+            "prediction": predicted_price,
+            "message": "success"
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
     finally:
         db.close()
 
