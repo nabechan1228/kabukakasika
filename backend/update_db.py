@@ -26,8 +26,9 @@ def update_stock_data():
             print(f"\n--- 銘柄 [{code}] の更新処理 ---")
             
             # 2. データベース内にあるこの銘柄の「最も新しい日付」を取得
-            query_max_date = f"SELECT MAX(date) as max_date FROM stock_prices WHERE code = '{code}'"
-            max_date_df = pd.read_sql(query_max_date, con=engine)
+            from sqlalchemy import text
+            query_max_date = text("SELECT MAX(date) as max_date FROM stock_prices WHERE code = :code")
+            max_date_df = pd.read_sql(query_max_date, con=engine.connect(), params={"code": code})
             last_date_str = max_date_df.iloc[0]['max_date']
 
             if not last_date_str:

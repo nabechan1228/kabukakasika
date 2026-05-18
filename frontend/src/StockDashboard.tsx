@@ -10,22 +10,118 @@ import {
   BarChart,
   Bar,
   ComposedChart,
-  Cell
+  Cell,
+  Area,
+  ReferenceArea
 } from 'recharts';
 
 import StockSearchBox from './StockSearchBox';
 
+// =========================================================
+// カスタムツールチップ (金融ターミナル風のプロフェッショナルな情報表示)
+// =========================================================
+const CustomTooltip = ({ active, payload }: any) => {
+  if (active && payload && payload.length) {
+    const data = payload[0].payload;
+    const isPred = data.type === 'prediction';
+    
+    return (
+      <div style={{
+        backgroundColor: 'rgba(15, 23, 42, 0.95)',
+        border: '1px solid var(--border-color)',
+        padding: '12px 16px',
+        borderRadius: '8px',
+        boxShadow: '0 10px 25px -5px rgba(0, 0, 0, 0.7)',
+        backdropFilter: 'blur(8px)',
+        fontSize: '12px',
+        color: '#f8fafc',
+        minWidth: '220px'
+      }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', borderBottom: '1px solid rgba(255,255,255,0.1)', paddingBottom: '6px', marginBottom: '6px', fontWeight: 'bold' }}>
+          <span style={{ color: 'var(--text-main)' }}>📅 {data.date}</span>
+          {isPred ? (
+            <span style={{ color: '#a855f7', background: 'rgba(168, 85, 247, 0.2)', padding: '2px 6px', borderRadius: '4px', fontSize: '10px' }}>AI予測</span>
+          ) : (
+            <span style={{ color: 'var(--accent-cyan)', background: 'rgba(6, 182, 212, 0.1)', padding: '2px 6px', borderRadius: '4px', fontSize: '10px' }}>実績</span>
+          )}
+        </div>
+        
+        {/* 株価４本値のグリッド */}
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '6px 12px', marginBottom: '8px' }}>
+          <div>始値: <strong style={{ float: 'right' }}>{data.open ? `¥${Math.round(data.open).toLocaleString()}` : '-'}</strong></div>
+          <div>終値: <strong style={{ float: 'right', color: isPred ? '#a855f7' : (data.isUp ? 'var(--up-color)' : 'var(--down-color)') }}>{data.close ? `¥${Math.round(data.close).toLocaleString()}` : '-'}</strong></div>
+          <div>高値: <strong style={{ float: 'right' }}>{data.high ? `¥${Math.round(data.high).toLocaleString()}` : '-'}</strong></div>
+          <div>安値: <strong style={{ float: 'right' }}>{data.low ? `¥${Math.round(data.low).toLocaleString()}` : '-'}</strong></div>
+        </div>
+
+        <div style={{ borderTop: '1px dashed rgba(255,255,255,0.1)', paddingTop: '6px', display: 'flex', flexDirection: 'column', gap: '4px' }}>
+          {!isPred ? (
+            <>
+              <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                <span>出来高:</span>
+                <strong>{data.volume ? `${data.volume.toLocaleString()} 株` : '0 株'}</strong>
+              </div>
+              {data.sma5 && (
+                <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                  <span style={{ color: '#f59e0b' }}>● 5日SMA:</span>
+                  <strong>¥{Math.round(data.sma5).toLocaleString()}</strong>
+                </div>
+              )}
+              {data.sma25 && (
+                <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                  <span style={{ color: '#84cc16' }}>● 25日SMA:</span>
+                  <strong>¥{Math.round(data.sma25).toLocaleString()}</strong>
+                </div>
+              )}
+              {data.bbUpper && (
+                <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                  <span style={{ color: 'rgba(139, 92, 246, 0.7)' }}>● ボリンジャー[+2σ]:</span>
+                  <strong>¥{Math.round(data.bbUpper).toLocaleString()}</strong>
+                </div>
+              )}
+              {data.bbLower && (
+                <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                  <span style={{ color: 'rgba(139, 92, 246, 0.7)' }}>● ボリンジャー[-2σ]:</span>
+                  <strong>¥{Math.round(data.bbLower).toLocaleString()}</strong>
+                </div>
+              )}
+              {data.rsi && (
+                <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                  <span style={{ color: 'var(--accent-pink)' }}>● RSI(14):</span>
+                  <strong style={{ color: data.rsi >= 70 ? 'var(--up-color)' : (data.rsi <= 30 ? 'var(--accent-cyan)' : '#fff') }}>{data.rsi.toFixed(1)}%</strong>
+                </div>
+              )}
+              {data.macd && (
+                <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                  <span style={{ color: 'var(--accent-cyan)' }}>● MACD:</span>
+                  <strong>{data.macd.toFixed(1)}</strong>
+                </div>
+              )}
+            </>
+          ) : (
+            <div style={{ color: '#a855f7', textAlign: 'center', marginTop: '4px', fontWeight: 'bold' }}>
+              🤖 AI予測終値: ¥{Math.round(data.close).toLocaleString()}
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  }
+  return null;
+};
 
 export default function StockDashboard() {
   const [selectedCode, setSelectedCode] = useState<string>("7203");
   const [stockData, setStockData] = useState<any[]>([]);
-  const [stockInfo, setStockInfo] = useState<any>(null); // 追加: 企業情報
-  const [watchlist, setWatchlist] = useState<{code: string, name: string}[]>([]); // 追加: ウォッチリスト
+  const [stockInfo, setStockInfo] = useState<any>(null); // 企業情報
+  const [watchlist, setWatchlist] = useState<{code: string, name: string}[]>([]); // ウォッチリスト
   
   const [loading, setLoading] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
   const [prediction, setPrediction] = useState<number | null>(null);
+  const [predictions, setPredictions] = useState<number[]>([]); // 追加: 5日予測値
   const [training, setTraining] = useState<boolean>(false);
+  const [trainingStatus, setTrainingStatus] = useState<{ status: string; progress: number; message: string }>({ status: 'idle', progress: 0, message: '' }); // 追加: 学習進捗
   
   const [chartType, setChartType] = useState<'line' | 'candle'>('candle');
 
@@ -33,8 +129,8 @@ export default function StockDashboard() {
   const [showSMA5, setShowSMA5] = useState<boolean>(true);
   const [showSMA25, setShowSMA25] = useState<boolean>(true);
   const [showBB, setShowBB] = useState<boolean>(true);
-  const [showRSI, setShowRSI] = useState<boolean>(true);   // 追加: RSI
-  const [showMACD, setShowMACD] = useState<boolean>(true); // 追加: MACD
+  const [showRSI, setShowRSI] = useState<boolean>(true);   // RSI
+  const [showMACD, setShowMACD] = useState<boolean>(true); // MACD
 
   // ウォッチリストのロード
   useEffect(() => {
@@ -45,7 +141,6 @@ export default function StockDashboard() {
   }, []);
 
   const handleToggleWatchlist = () => {
-    // 企業名がわからない場合はスキップ（安全対策）
     const name = stockInfo?.name || "銘柄";
     const exists = watchlist.find(w => w.code === selectedCode);
     let updated;
@@ -58,14 +153,63 @@ export default function StockDashboard() {
     localStorage.setItem('kabukakasika_watchlist', JSON.stringify(updated));
   };
 
+  // ▼ 実績データと予測データを結合し、ボリンジャーバンド用レンジも計算する
   const chartData = useMemo(() => {
-    return stockData.map(item => ({
+    if (stockData.length === 0) return [];
+
+    // 1. 既存の過去実績データを整形
+    const formattedData = stockData.map(item => ({
       ...item,
       lowHigh: [item.low, item.high],
       openClose: [Math.min(item.open, item.close), Math.max(item.open, item.close)],
-      isUp: item.close >= item.open
+      isUp: item.close >= item.open,
+      bbLowerUpper: item.bbLower && item.bbUpper ? [item.bbLower, item.bbUpper] : null,
+      type: 'historical',
+      prediction: null // 過去データは予測線表示用には基本null
     }));
-  }, [stockData]);
+
+    // 2. 予測データがある場合、実績データの末尾から連結する
+    if (predictions && predictions.length > 0) {
+      const lastItem = formattedData[formattedData.length - 1];
+      
+      // 折れ線が実績の終値からシームレスに繋がるよう、実績の最終日の予測値（prediction）に実績終値をセット
+      formattedData[formattedData.length - 1].prediction = lastItem.close;
+
+      const lastDate = new Date(lastItem.date);
+
+      const predictionItems = predictions.map((predPrice, idx) => {
+        // 土日を除く未来の営業日を計算
+        let nextDate = new Date(lastDate);
+        let daysCount = 0;
+        while (daysCount < idx + 1) {
+          nextDate.setDate(nextDate.getDate() + 1);
+          const day = nextDate.getDay();
+          if (day !== 0 && day !== 6) {
+            daysCount++;
+          }
+        }
+
+        const dateStr = nextDate.toISOString().split('T')[0];
+
+        return {
+          date: `${dateStr} (予)`,
+          close: predPrice,
+          open: idx === 0 ? lastItem.close : predictions[idx - 1], // 直前の終値を今日の始値とする
+          low: predPrice,
+          high: predPrice,
+          volume: 0,
+          type: 'prediction',
+          prediction: predPrice,
+          isUp: idx === 0 ? predPrice >= lastItem.close : predPrice >= predictions[idx - 1],
+          bbLowerUpper: null
+        };
+      });
+
+      return [...formattedData, ...predictionItems];
+    }
+
+    return formattedData;
+  }, [stockData, predictions]);
 
   useEffect(() => {
     const fetchStockData = async () => {
@@ -92,9 +236,14 @@ export default function StockDashboard() {
           if (predResponse.ok) {
             const predData = await predResponse.json();
             setPrediction(predData.prediction);
-          } else setPrediction(null);
+            setPredictions(predData.predictions || []);
+          } else {
+            setPrediction(null);
+            setPredictions([]);
+          }
         } catch (e) {
           setPrediction(null);
+          setPredictions([]);
         }
       } catch (err: any) {
         setError(err.message);
@@ -105,20 +254,60 @@ export default function StockDashboard() {
     fetchStockData();
   }, [selectedCode]);
 
+  // 非同期学習ポーリングロジックの導入
   const handleTrainModel = async () => {
     setTraining(true);
     setError(null);
+    setTrainingStatus({ status: 'training', progress: 0, message: 'AI学習タスクを開始中...' });
+
     try {
       const response = await fetch(`http://localhost:8000/api/train/${selectedCode}`, { method: 'POST' });
-      if (!response.ok) throw new Error('AIの学習に失敗しました');
-      const data = await response.json();
-      setPrediction(data.prediction);
+      if (!response.ok) throw new Error('AIの学習開始に失敗しました');
+      
+      const pollInterval = setInterval(async () => {
+        try {
+          const statusRes = await fetch(`http://localhost:8000/api/train/status/${selectedCode}`);
+          if (!statusRes.ok) return;
+          const statusData = await statusRes.json();
+          
+          setTrainingStatus({
+            status: statusData.status,
+            progress: statusData.progress,
+            message: statusData.message
+          });
+
+          if (statusData.status === 'success') {
+            clearInterval(pollInterval);
+            setPredictions(statusData.predictions || []);
+            setPrediction(statusData.prediction);
+            setTraining(false);
+          } else if (statusData.status === 'failed') {
+            clearInterval(pollInterval);
+            setError(statusData.message || 'AI学習プロセスでエラーが発生しました');
+            setTraining(false);
+          }
+        } catch (pollErr) {
+          console.error("Status polling failed:", pollErr);
+        }
+      }, 700); // 700msごとに進捗を取得
+      
     } catch (err: any) {
       setError(err.message);
-    } finally {
       setTraining(false);
     }
   };
+
+  // AI予測エリアの表示用X軸範囲の取得
+  const predStartDate = useMemo(() => {
+    const predItem = chartData.find(d => d.type === 'prediction');
+    return predItem ? predItem.date : undefined;
+  }, [chartData]);
+
+  const predEndDate = useMemo(() => {
+    if (chartData.length === 0) return undefined;
+    const lastItem = chartData[chartData.length - 1];
+    return lastItem.type === 'prediction' ? lastItem.date : undefined;
+  }, [chartData]);
 
   const isWatched = watchlist.some(w => w.code === selectedCode);
 
@@ -202,16 +391,42 @@ export default function StockDashboard() {
             
             {/* メインチャート */}
             <div style={{ backgroundColor: 'var(--panel-bg)', padding: '15px', borderRadius: '12px', border: '1px solid var(--border-color)' }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '15px' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '15px', flexWrap: 'wrap', gap: '10px' }}>
                 <h2 style={{ fontSize: '16px', margin: 0, color: 'var(--text-muted)' }}>株価推移・テクニカル指標</h2>
                 
-                {prediction !== null ? (
-                  <div style={{ background: 'linear-gradient(135deg, #8b5cf6 0%, #ec4899 100%)', padding: '6px 14px', borderRadius: '20px', color: '#fff', fontWeight: 'bold', fontSize: '13px', boxShadow: '0 0 10px rgba(236, 72, 153, 0.4)' }}>
-                    🤖 AI予測 (翌日終値): {Math.round(prediction).toLocaleString()} 円
+                {training ? (
+                  /* ⚡ AI学習中 プログレスバーUI */
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', width: '220px', background: 'rgba(15,23,42,0.8)', padding: '8px 12px', borderRadius: '8px', border: '1px solid var(--border-color)' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '11px', fontWeight: 'bold' }}>
+                      <span style={{ color: 'var(--accent-cyan)' }}>⚡ AI学習中...</span>
+                      <span>{trainingStatus.progress}%</span>
+                    </div>
+                    <div style={{ width: '100%', height: '5px', background: 'rgba(255,255,255,0.1)', borderRadius: '3px', overflow: 'hidden' }}>
+                      <div style={{ width: `${trainingStatus.progress}%`, height: '100%', background: 'linear-gradient(90deg, #06b6d4, #8b5cf6)', borderRadius: '3px', transition: 'width 0.2s ease' }} />
+                    </div>
+                    <span style={{ fontSize: '9px', color: 'var(--text-muted)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{trainingStatus.message}</span>
                   </div>
-                ) : training ? (
-                  <div style={{ background: 'linear-gradient(135deg, #fbc2eb 0%, #a6c1ee 100%)', padding: '6px 14px', borderRadius: '20px', color: '#fff', fontWeight: 'bold', fontSize: '13px', opacity: 0.8 }}>
-                    ⚡ AI学習中... (約5秒)
+                ) : prediction !== null ? (
+                  <div style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
+                    <div style={{ background: 'linear-gradient(135deg, #8b5cf6 0%, #ec4899 100%)', padding: '6px 14px', borderRadius: '20px', color: '#fff', fontWeight: 'bold', fontSize: '13px', boxShadow: '0 0 10px rgba(236, 72, 153, 0.4)' }}>
+                      🤖 AI予測 (翌日終値): {Math.round(prediction).toLocaleString()} 円
+                    </div>
+                    <button 
+                      onClick={handleTrainModel} 
+                      style={{ 
+                        background: 'rgba(255,255,255,0.05)', 
+                        border: '1px solid var(--border-color)', 
+                        padding: '6px 12px', 
+                        borderRadius: '20px', 
+                        color: 'var(--text-main)', 
+                        fontSize: '12px', 
+                        cursor: 'pointer',
+                        transition: 'background-color 0.2s'
+                      }} 
+                      title="モデルを再学習します"
+                    >
+                      再学習
+                    </button>
                   </div>
                 ) : (
                   <button onClick={handleTrainModel} style={{ background: 'linear-gradient(135deg, #10b981 0%, #059669 100%)', border: 'none', padding: '6px 14px', borderRadius: '20px', color: '#fff', fontWeight: 'bold', cursor: 'pointer', fontSize: '13px', boxShadow: '0 0 10px rgba(16, 185, 129, 0.4)' }}>
@@ -227,15 +442,30 @@ export default function StockDashboard() {
                     <XAxis dataKey="date" tick={{fontSize: 11, fill: '#94a3b8'}} stroke="rgba(255,255,255,0.1)" />
                     <YAxis domain={['auto', 'auto']} tick={{fontSize: 11, fill: '#94a3b8'}} stroke="rgba(255,255,255,0.1)" />
                     
-                    <Tooltip contentStyle={{ backgroundColor: 'rgba(15,23,42,0.9)', border: '1px solid var(--border-color)', borderRadius: '8px', color: '#fff' }} formatter={(value, name, props) => {
-                      if (name === "高値・安値" && Array.isArray(value)) return [`安値: ${value[0].toLocaleString()}円 / 高値: ${value[1].toLocaleString()}円`, name];
-                      if (name === "始値・終値" && Array.isArray(value)) {
-                        const isUp = props.payload.isUp;
-                        return [`${isUp ? '陽線 (上昇)' : '陰線 (下落)'} (始値: ${props.payload.open.toLocaleString()}円 / 終値: ${props.payload.close.toLocaleString()}円)`, name];
-                      }
-                      if (typeof value === 'number') return [`${value.toLocaleString()}円`, name];
-                      return [value, name];
-                    }} />
+                    <Tooltip content={<CustomTooltip />} />
+
+                    {/* AI予測期間エリアの半透明グラデーション背景 */}
+                    {predStartDate && predEndDate && (
+                      <ReferenceArea 
+                        x1={predStartDate} 
+                        x2={predEndDate} 
+                        fill="rgba(168, 85, 247, 0.05)" 
+                        stroke="rgba(168, 85, 247, 0.2)"
+                        strokeDasharray="3 3"
+                      />
+                    )}
+
+                    {/* ボリンジャーバンド半透明エリア塗りつぶし */}
+                    {showBB && (
+                      <Area 
+                        type="monotone" 
+                        dataKey="bbLowerUpper" 
+                        fill="rgba(139, 92, 246, 0.03)" 
+                        stroke="none" 
+                        name="ボリンジャーバンド"
+                        legendType="none"
+                      />
+                    )}
                     
                     {chartType === 'line' && <Line type="monotone" dataKey="close" stroke="var(--accent-cyan)" strokeWidth={2} dot={false} name="終値" />}
                     {chartType === 'candle' && <Bar dataKey="lowHigh" barSize={2} fill="#64748b" name="高値・安値" />}
@@ -249,8 +479,22 @@ export default function StockDashboard() {
                     
                     {showSMA5 && <Line type="monotone" dataKey="sma5" stroke="#f59e0b" strokeWidth={1.5} dot={false} name="5日SMA" />}
                     {showSMA25 && <Line type="monotone" dataKey="sma25" stroke="#84cc16" strokeWidth={1.5} dot={false} name="25日SMA" />}
-                    {showBB && <Line type="monotone" dataKey="bbUpper" stroke="rgba(139, 92, 246, 0.5)" strokeWidth={1.5} strokeDasharray="5 5" dot={false} name="+2σ" />}
-                    {showBB && <Line type="monotone" dataKey="bbLower" stroke="rgba(139, 92, 246, 0.5)" strokeWidth={1.5} strokeDasharray="5 5" dot={false} name="-2σ" />}
+                    
+                    {/* ボリンジャーバンド上限・下限ライン */}
+                    {showBB && <Line type="monotone" dataKey="bbUpper" stroke="rgba(139, 92, 246, 0.4)" strokeWidth={1.2} strokeDasharray="4 4" dot={false} name="+2σ" />}
+                    {showBB && <Line type="monotone" dataKey="bbLower" stroke="rgba(139, 92, 246, 0.4)" strokeWidth={1.2} strokeDasharray="4 4" dot={false} name="-2σ" />}
+
+                    {/* AI予測折れ線 (ネオンパープルの破線) */}
+                    <Line 
+                      type="monotone" 
+                      dataKey="prediction" 
+                      stroke="#a855f7" 
+                      strokeWidth={2} 
+                      strokeDasharray="4 4" 
+                      dot={{ r: 3.5, fill: '#a855f7', strokeWidth: 0 }}
+                      name="AI予測終値" 
+                      connectNulls
+                    />
                   </ComposedChart>
                 </ResponsiveContainer>
               </div>
@@ -307,8 +551,15 @@ export default function StockDashboard() {
                 <ResponsiveContainer width="100%" height="100%">
                   <BarChart data={chartData} margin={{ top: 0, right: 20, bottom: 0, left: 0 }}>
                     <XAxis dataKey="date" hide />
-                    <Tooltip contentStyle={{ backgroundColor: 'rgba(15,23,42,0.9)', border: 'none', borderRadius: '4px' }} />
-                    <Bar dataKey="volume" fill="rgba(248, 250, 252, 0.2)" name="出来高" />
+                    <Tooltip content={<CustomTooltip />} />
+                    <Bar dataKey="volume" name="出来高">
+                      {chartData.map((entry, index) => (
+                        <Cell 
+                          key={`cell-vol-${index}`} 
+                          fill={entry.close >= entry.open ? 'rgba(16, 185, 129, 0.35)' : 'rgba(239, 68, 68, 0.35)'} 
+                        />
+                      ))}
+                    </Bar>
                   </BarChart>
                 </ResponsiveContainer>
               </div>

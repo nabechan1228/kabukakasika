@@ -4,7 +4,7 @@ import pandas as pd
 import numpy as np
 from sqlalchemy import create_engine
 from sklearn.preprocessing import MinMaxScaler
-import pickle
+import json
 
 # ---------------------------------------------
 # 1. データ準備と前処理
@@ -14,8 +14,10 @@ TARGET_CODE = "7203"
 DATABASE_URL = "sqlite:///./stock_data.db"
 
 print(f"[{TARGET_CODE}] のデータを読み込んでいます...")
+from sqlalchemy import text
 engine = create_engine(DATABASE_URL)
-df = pd.read_sql(f"SELECT date, close FROM stock_prices WHERE code = '{TARGET_CODE}' ORDER BY date ASC", con=engine)
+query = text("SELECT date, close FROM stock_prices WHERE code = :code ORDER BY date ASC")
+df = pd.read_sql(query, con=engine.connect(), params={"code": TARGET_CODE})
 
 if len(df) < 100:
     raise ValueError("学習に十分なデータがありません。")
@@ -28,8 +30,13 @@ scaler = MinMaxScaler(feature_range=(0, 1))
 scaled_prices = scaler.fit_transform(prices)
 
 # スケーラーを保存（FastAPIでの推論時、予測値を元の株価のスケールに戻すために必須です）
-with open(f"scaler_{TARGET_CODE}.pkl", "wb") as f:
-    pickle.dump(scaler, f)
+# スケーラーを保存（FastAPIでの推論時、予測値を元の株価のスケールに戻すために必須です。安全なJSON形式で保存します）
+scaler_data = {
+    "data_min": scaler.data_min_.tolist(),
+    "data_max": scaler.data_max_.tolist()
+}
+with open(f"scaler_{TARGET_CODE}.json", "w") as f:
+    json.dump(scaler_data, f)
 
 # ---------------------------------------------
 # 2. シーケンスデータの作成（過去60日 -> 翌日）
