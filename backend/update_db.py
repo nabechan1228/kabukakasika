@@ -12,8 +12,10 @@ def update_stock_data():
 
     try:
         # 1. データベースに登録されている銘柄コードを重複なしで取得
-        query_codes = "SELECT DISTINCT code FROM stock_prices"
-        codes_df = pd.read_sql(query_codes, con=engine)
+        from sqlalchemy import text as sa_text
+        query_codes = sa_text("SELECT DISTINCT code FROM stock_prices")
+        with engine.connect() as conn:
+            codes_df = pd.read_sql(query_codes, con=conn)
         
         if codes_df.empty:
             print("データベースに銘柄が登録されていません。まずは画面から銘柄を選択して初回データを取得してください。")
@@ -28,7 +30,8 @@ def update_stock_data():
             # 2. データベース内にあるこの銘柄の「最も新しい日付」を取得
             from sqlalchemy import text
             query_max_date = text("SELECT MAX(date) as max_date FROM stock_prices WHERE code = :code")
-            max_date_df = pd.read_sql(query_max_date, con=engine.connect(), params={"code": code})
+            with engine.connect() as conn:
+                max_date_df = pd.read_sql(query_max_date, con=conn, params={"code": code})
             last_date_str = max_date_df.iloc[0]['max_date']
 
             if not last_date_str:

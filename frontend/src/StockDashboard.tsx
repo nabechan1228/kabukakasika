@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, useRef } from 'react';
 import {
   LineChart,
   Line,
@@ -16,6 +16,9 @@ import {
 } from 'recharts';
 
 import StockSearchBox from './StockSearchBox';
+
+// APIベースURL (環境変数から取得、デフォルトはローカル開発用)
+const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 
 // =========================================================
 // カスタムツールチップ (金融ターミナル風のプロフェッショナルな情報表示)
@@ -119,9 +122,21 @@ export default function StockDashboard() {
   const [loading, setLoading] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
   const [prediction, setPrediction] = useState<number | null>(null);
-  const [predictions, setPredictions] = useState<number[]>([]); // 追加: 5日予測値
+  const [predictions, setPredictions] = useState<number[]>([]);
+  const [mape, setMape] = useState<number | null>(null); // 予測精度 (MAPE)
   const [training, setTraining] = useState<boolean>(false);
-  const [trainingStatus, setTrainingStatus] = useState<{ status: string; progress: number; message: string }>({ status: 'idle', progress: 0, message: '' }); // 追加: 学習進捗
+  const [trainingStatus, setTrainingStatus] = useState<{ status: string; progress: number; message: string }>({ status: 'idle', progress: 0, message: '' });
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // コンポーネントunmount時にポーリングをクリーンアップ
+  useEffect(() => {
+    return () => {
+      if (pollRef.current) {
+        clearInterval(pollRef.current);
+        pollRef.current = null;
+      }
+    };
+  }, []);
   
   const [chartType, setChartType] = useState<'line' | 'candle'>('candle');
 
@@ -216,14 +231,14 @@ export default function StockDashboard() {
       setLoading(true);
       setError(null);
       try {
-        const response = await fetch(`http://localhost:8000/api/stock/${selectedCode}`);
+        const response = await fetch(`${API_BASE}/api/stock/${selectedCode}`);
         if (!response.ok) throw new Error('データの取得に失敗しました');
         const data = await response.json();
         setStockData(data);
 
         // 企業情報の取得
         try {
-          const infoRes = await fetch(`http://localhost:8000/api/info/${selectedCode}`);
+          const infoRes = await fetch(`${API_BASE}/api/info/${selectedCode}`);
           if (infoRes.ok) setStockInfo(await infoRes.json());
           else setStockInfo(null);
         } catch (e) {
@@ -232,11 +247,12 @@ export default function StockDashboard() {
 
         // AI予測の取得
         try {
-          const predResponse = await fetch(`http://localhost:8000/api/predict/${selectedCode}`);
+          const predResponse = await fetch(`${API_BASE}/api/predict/${selectedCode}`);
           if (predResponse.ok) {
             const predData = await predResponse.json();
             setPrediction(predData.prediction);
             setPredictions(predData.predictions || []);
+            setMape(predData.mape || null);
           } else {
             setPrediction(null);
             setPredictions([]);
@@ -244,6 +260,7 @@ export default function StockDashboard() {
         } catch (e) {
           setPrediction(null);
           setPredictions([]);
+          setMape(null);
         }
       } catch (err: any) {
         setError(err.message);
@@ -261,12 +278,15 @@ export default function StockDashboard() {
     setTrainingStatus({ status: 'training', progress: 0, message: 'AI学習タスクを開始中...' });
 
     try {
-      const response = await fetch(`http://localhost:8000/api/train/${selectedCode}`, { method: 'POST' });
+      // 前回のポーリングが残っていればクリア
+      if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
+
+      const response = await fetch(`${API_BASE}/api/train/${selectedCode}`, { method: 'POST' });
       if (!response.ok) throw new Error('AIの学習開始に失敗しました');
       
-      const pollInterval = setInterval(async () => {
+      pollRef.current = setInterval(async () => {
         try {
-          const statusRes = await fetch(`http://localhost:8000/api/train/status/${selectedCode}`);
+          const statusRes = await fetch(`${API_BASE}/api/train/status/${selectedCode}`);
           if (!statusRes.ok) return;
           const statusData = await statusRes.json();
           
@@ -277,19 +297,20 @@ export default function StockDashboard() {
           });
 
           if (statusData.status === 'success') {
-            clearInterval(pollInterval);
+            if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
             setPredictions(statusData.predictions || []);
             setPrediction(statusData.prediction);
+            setMape(statusData.mape || null);
             setTraining(false);
           } else if (statusData.status === 'failed') {
-            clearInterval(pollInterval);
+            if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
             setError(statusData.message || 'AI学習プロセスでエラーが発生しました');
             setTraining(false);
           }
         } catch (pollErr) {
           console.error("Status polling failed:", pollErr);
         }
-      }, 700); // 700msごとに進捗を取得
+      }, 800);
       
     } catch (err: any) {
       setError(err.message);
@@ -407,10 +428,20 @@ export default function StockDashboard() {
                     <span style={{ fontSize: '9px', color: 'var(--text-muted)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{trainingStatus.message}</span>
                   </div>
                 ) : prediction !== null ? (
-                  <div style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
+                  <div style={{ display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap' }}>
                     <div style={{ background: 'linear-gradient(135deg, #8b5cf6 0%, #ec4899 100%)', padding: '6px 14px', borderRadius: '20px', color: '#fff', fontWeight: 'bold', fontSize: '13px', boxShadow: '0 0 10px rgba(236, 72, 153, 0.4)' }}>
                       🤖 AI予測 (翌日終値): {Math.round(prediction).toLocaleString()} 円
                     </div>
+                    {mape !== null && (
+                      <div style={{
+                        padding: '4px 10px', borderRadius: '12px', fontSize: '11px', fontWeight: 'bold',
+                        background: mape < 2 ? 'rgba(16,185,129,0.2)' : mape < 5 ? 'rgba(245,158,11,0.2)' : 'rgba(239,68,68,0.2)',
+                        color: mape < 2 ? '#10b981' : mape < 5 ? '#f59e0b' : '#ef4444',
+                        border: `1px solid ${mape < 2 ? 'rgba(16,185,129,0.4)' : mape < 5 ? 'rgba(245,158,11,0.4)' : 'rgba(239,68,68,0.4)'}`
+                      }}>
+                        精度: MAPE {mape.toFixed(1)}%
+                      </div>
+                    )}
                     <button 
                       onClick={handleTrainModel} 
                       style={{ 
