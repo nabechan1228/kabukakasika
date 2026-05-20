@@ -51,9 +51,9 @@ def get_db():
         db.close()
 
 # ---------------------------------------------------------
-# 1.5. マルチフィーチャーLSTMモデル (精度改善版 v3)
+# 1.5. マルチフィーチャーLSTMモデル (精度改善版 v4)
 # ---------------------------------------------------------
-FEATURE_COUNT = 5  # [log_return, volume_norm, sma5_dev, rsi, macd]
+FEATURE_COUNT = 7  # [log_return, volume_norm, sma5_dev, rsi, macd, n225_return, usdjpy_return]
 SEQ_LENGTH = 60
 PREDICT_DAYS = 5   # 未来5日間を一括予測
 
@@ -107,6 +107,61 @@ def extract_feature_matrix(df: pd.DataFrame) -> np.ndarray:
 def extract_feature_matrix_v3(df: pd.DataFrame) -> np.ndarray:
     """v3: log_return 基準の特徴量行列（非定常性問題を解消）"""
     cols = ['log_return', 'volume_norm', 'sma5_dev', 'rsi', 'macd']
+    return df[cols].dropna().reset_index(drop=True).values
+
+def compute_features_v4(df: pd.DataFrame) -> pd.DataFrame:
+    """v4: マクロ指標 (日経平均, ドル円) の変化率を追加"""
+    df['log_return'] = np.log(df['close'] / df['close'].shift(1))
+
+    sma5 = df['close'].rolling(window=5).mean()
+    df['sma5_dev'] = ((df['close'] - sma5) / sma5) * 100
+
+    delta = df['close'].diff()
+    gain = delta.where(delta > 0, 0).rolling(window=14).mean()
+    loss_s = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+    rs = gain / loss_s
+    df['rsi'] = 100 - (100 / (1 + rs))
+
+    exp12 = df['close'].ewm(span=12, adjust=False).mean()
+    exp26 = df['close'].ewm(span=26, adjust=False).mean()
+    df['macd'] = exp12 - exp26
+
+    vol_max = df['volume'].max()
+    df['volume_norm'] = df['volume'] / vol_max if vol_max > 0 else 0
+
+    # マクロ指標の取得と変化率計算
+    import datetime
+    start_date = df['date'].min()
+    end_date_dt = datetime.datetime.strptime(df['date'].max(), '%Y-%m-%d') + datetime.timedelta(days=2)
+    end_date = end_date_dt.strftime('%Y-%m-%d')
+    
+    # yfinance は警告を出さないように quiet=True でダウンロード（可能であれば）
+    macro_n225 = yf.download("^N225", start=start_date, end=end_date, progress=False)
+    macro_fx = yf.download("USDJPY=X", start=start_date, end=end_date, progress=False)
+    
+    n225_close = macro_n225['Close'].squeeze() if 'Close' in macro_n225 else macro_n225.iloc[:, 0]
+    fx_close = macro_fx['Close'].squeeze() if 'Close' in macro_fx else macro_fx.iloc[:, 0]
+    
+    n225_return = n225_close.pct_change()
+    fx_return = fx_close.pct_change()
+    
+    macro_df = pd.DataFrame({
+        'n225_return': n225_return,
+        'usdjpy_return': fx_return
+    }).reset_index()
+    
+    date_col = 'Date' if 'Date' in macro_df.columns else macro_df.columns[0]
+    macro_df['date'] = macro_df[date_col].dt.strftime('%Y-%m-%d')
+    
+    df = pd.merge(df, macro_df[['date', 'n225_return', 'usdjpy_return']], on='date', how='left')
+    df['n225_return'] = df['n225_return'].fillna(0)
+    df['usdjpy_return'] = df['usdjpy_return'].fillna(0)
+    
+    return df
+
+def extract_feature_matrix_v4(df: pd.DataFrame) -> np.ndarray:
+    """v4: 7次元特徴量行列"""
+    cols = ['log_return', 'volume_norm', 'sma5_dev', 'rsi', 'macd', 'n225_return', 'usdjpy_return']
     return df[cols].dropna().reset_index(drop=True).values
 
 # ---------------------------------------------------------
@@ -278,7 +333,36 @@ def predict_stock(code: str):
         close_min, close_max = scaler.data_min_[0], scaler.data_max_[0]
         close_range = close_max - close_min
 
-        if model_ver >= 3:
+        if model_ver >= 4:
+            # v4: 7次元特徴量 + マクロ指標
+            df = compute_features_v4(df)
+            fm = extract_feature_matrix_v4(df)
+            if len(fm) < SEQ_LENGTH:
+                return {"code": code, "prediction": None, "predictions": [], "mape": None, "message": "データ不足"}
+
+            df_clean = df[['close', 'log_return', 'volume_norm', 'sma5_dev', 'rsi', 'macd', 'n225_return', 'usdjpy_return']].dropna().reset_index(drop=True)
+            last_close = float(df_clean['close'].iloc[-1])
+
+            scaled = scaler.transform(fm)
+            model = StockLSTM(input_size=input_size, hidden_size=64, num_layers=2, dropout=0.3, output_size=PREDICT_DAYS)
+            model.load_state_dict(torch.load(model_path, weights_only=True))
+            model.eval()
+
+            seq = scaled[-SEQ_LENGTH:].copy()
+            xt = torch.tensor(seq, dtype=torch.float32).unsqueeze(0)
+            with torch.no_grad():
+                log_preds_scaled = model(xt).numpy().flatten()  # shape: (PREDICT_DAYS,)
+
+            lr_range = close_range
+            log_preds = log_preds_scaled * lr_range + close_min
+            pa = []
+            price = last_close
+            for lr in log_preds:
+                price = price * np.exp(float(lr))
+                pa.append(price)
+            actuals = pa
+
+        elif model_ver == 3:
             # v3: log_return特徴量 + 1回の推論で5日分一括予測（特徴量崩壊なし）
             df = compute_features(df)
             fm = extract_feature_matrix_v3(df)
@@ -416,11 +500,11 @@ def run_training_task(code: str):
             update_status(code, {"status": "failed", "progress": 0, "message": "学習に必要なデータが不足しています。"})
             return
 
-        update_status(code, {"status": "training", "progress": 15, "message": "特徴量を計算中..."})
+        update_status(code, {"status": "training", "progress": 15, "message": "特徴量とマクロ指標を計算中..."})
 
-        # 特徴量エンジニアリング (v3: log_return 使用)
-        df = compute_features(df)
-        fm = extract_feature_matrix_v3(df)
+        # 特徴量エンジニアリング (v4: マクロ指標 使用)
+        df = compute_features_v4(df)
+        fm = extract_feature_matrix_v4(df)
 
         if len(fm) < SEQ_LENGTH + PREDICT_DAYS:
             update_status(code, {"status": "failed", "progress": 0, "message": "特徴量計算後のデータが不足しています。"})
@@ -445,7 +529,7 @@ def run_training_task(code: str):
         yt, yv = torch.tensor(y[:sp], dtype=torch.float32), torch.tensor(y[sp:], dtype=torch.float32)
 
         update_status(code, {"status": "training", "progress": 20,
-            "message": f"モデル構築中 v3 (データ: {len(X)}サンプル, 入力: {FEATURE_COUNT}次元, 出力: {PREDICT_DAYS}日)"})
+            "message": f"モデル構築中 v4 (データ: {len(X)}サンプル, 入力: {FEATURE_COUNT}次元, 出力: {PREDICT_DAYS}日)"})
 
         # モデル・オプティマイザ構築
         model = StockLSTM(input_size=FEATURE_COUNT)
@@ -517,14 +601,14 @@ def run_training_task(code: str):
         mae_pct = float(np.mean(np.abs(va_lr - vp_lr)) * 100)  # 例: 1.5 → "±1.5%/日の誤差"
         mape = round(mae_pct, 4) if not np.isnan(mae_pct) else None
 
-        # スケーラー保存 (v3)
+        # スケーラー保存 (v4)
         last_close = float(df['close'].dropna().iloc[-1])
         sdata = {
-            "feature_names": ["log_return", "volume_norm", "sma5_dev", "rsi", "macd"],
+            "feature_names": ["log_return", "volume_norm", "sma5_dev", "rsi", "macd", "n225_return", "usdjpy_return"],
             "data_min": scaler.data_min_.tolist(),
             "data_max": scaler.data_max_.tolist(),
             "input_size": FEATURE_COUNT,
-            "model_version": 3,
+            "model_version": 4,
             "last_close": last_close,
             "val_mape": round(mape, 2) if mape else None
         }
@@ -533,7 +617,7 @@ def run_training_task(code: str):
 
         update_status(code, {"status": "training", "progress": 95, "message": "未来5日間の予測を生成中..."})
 
-        # 未来5日間予測 (v3: 1回の推論で一括取得、特徴量崩壊なし)
+        # 未来5日間予測 (v4: 1回の推論で一括取得、特徴量崩壊なし)
         seq = scaled[-SEQ_LENGTH:].copy()
         xp = torch.tensor(seq, dtype=torch.float32).unsqueeze(0)
         with torch.no_grad():
