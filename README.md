@@ -56,3 +56,7 @@ Node.js が必要です。
 ## 📚 使用技術
 - **Backend**: Python, FastAPI, yfinance, Pandas, Uvicorn
 - **Frontend**: React (TypeScript), Vite, Recharts (グラフ描画)
+
+## 🔧 データ堅牢化とトラブルシューティング
+株価データ取得時の yfinance 由来のデータ欠損（最新営業日の終値 NaN 問題）に対して、自動で `period='1d'` からデータを再取得・補完する自己修復ロジックを実装しています。
+詳細な仕様や手動修復手順については、[yfinance最新データ欠損対策の仕様ドキュメント](file:///c:/Users/nabe4/kabukakasika/backend/yfinance_nan_handling.md) を参照してください。
