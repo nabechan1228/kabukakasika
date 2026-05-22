@@ -427,12 +427,12 @@ export default function StockDashboard() {
                     </div>
                     <span style={{ fontSize: '9px', color: 'var(--text-muted)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{trainingStatus.message}</span>
                   </div>
-                ) : prediction !== null ? (
+                ) : (prediction !== null && !isNaN(prediction)) ? (
                   <div style={{ display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap' }}>
                     <div style={{ background: 'linear-gradient(135deg, #8b5cf6 0%, #ec4899 100%)', padding: '6px 14px', borderRadius: '20px', color: '#fff', fontWeight: 'bold', fontSize: '13px', boxShadow: '0 0 10px rgba(236, 72, 153, 0.4)' }}>
                       🤖 AI予測 (翌日終値): {Math.round(prediction).toLocaleString()} 円
                     </div>
-                    {mape !== null && (
+                    {mape !== null && !isNaN(mape) && (
                       <div style={{
                         padding: '4px 10px', borderRadius: '12px', fontSize: '11px', fontWeight: 'bold',
                         background: mape < 2 ? 'rgba(16,185,129,0.2)' : mape < 5 ? 'rgba(245,158,11,0.2)' : 'rgba(239,68,68,0.2)',

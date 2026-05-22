@@ -38,9 +38,8 @@ def update_stock_data():
                 print(f"[{code}] データがありません。スキップします。")
                 continue
 
-            # 文字列の日付を日付型に変換し、取得開始日（保存されている最新日の翌日）を計算
-            last_date = datetime.strptime(last_date_str, '%Y-%m-%d')
-            start_date = (last_date + timedelta(days=1)).strftime('%Y-%m-%d')
+            # start_date を last_date_str と同じにすることで、時差によるデータ漏れを防ぐ
+            start_date = last_date_str
             today = datetime.now().strftime('%Y-%m-%d')
 
             # 今日よりも未来の日付になっていれば、すでに最新
@@ -59,6 +58,25 @@ def update_stock_data():
                 print(f"[{code}] 新しいデータはありませんでした。")
                 continue
 
+            # 【補完】最新日のデータが不完全な場合は、period='1d' で再取得を試みる
+            last_idx = hist.index[-1]
+            last_row = hist.iloc[-1]
+            if pd.isna(last_row['Open']) or pd.isna(last_row['Close']) or pd.isna(last_row['High']) or pd.isna(last_row['Low']):
+                try:
+                    print(f"[{code}] 最新日 {last_idx.strftime('%Y-%m-%d')} のデータに欠損値があるため、period='1d' で再取得を試みます。")
+                    today_hist = ticker.history(period="1d")
+                    if not today_hist.empty:
+                        today_row = today_hist.iloc[-1]
+                        if not (pd.isna(today_row['Open']) or pd.isna(today_row['Close']) or pd.isna(today_row['High']) or pd.isna(today_row['Low'])):
+                            hist.loc[last_idx, 'Open'] = today_row['Open']
+                            hist.loc[last_idx, 'High'] = today_row['High']
+                            hist.loc[last_idx, 'Low'] = today_row['Low']
+                            hist.loc[last_idx, 'Close'] = today_row['Close']
+                            hist.loc[last_idx, 'Volume'] = today_row['Volume']
+                            print(f"[{code}] 最新日のデータを補完しました。")
+                except Exception as ex:
+                    print(f"[{code}] 補完エラー: {ex}")
+
             # 4. データベースのテーブル定義に合わせてデータを整形
             records = []
             for index, row in hist.iterrows():
@@ -66,6 +84,11 @@ def update_stock_data():
                 
                 # yfinanceの仕様上、指定した開始日以前のデータが混ざることがあるため重複をブロック
                 if date_str <= last_date_str:
+                    continue
+
+                # 価格データが NaN（不完全なデータ）の場合はDB登録をスキップする
+                if pd.isna(row['Open']) or pd.isna(row['Close']) or pd.isna(row['High']) or pd.isna(row['Low']):
+                    print(f"[{code}] {date_str} の価格データが不完全なため、スキップします。")
                     continue
 
                 records.append({
