@@ -3,6 +3,10 @@ import yfinance as yf
 from sqlalchemy import create_engine
 from datetime import datetime, timedelta
 
+# main.py から最新値補完ヘルパーをインポート
+from main import safe_complement_historical_data
+
+
 # データベースの接続設定（main.pyと同じ）
 DATABASE_URL = "sqlite:///./stock_data.db"
 engine = create_engine(DATABASE_URL)
@@ -58,24 +62,8 @@ def update_stock_data():
                 print(f"[{code}] 新しいデータはありませんでした。")
                 continue
 
-            # 【補完】最新日のデータが不完全な場合は、period='1d' で再取得を試みる
-            last_idx = hist.index[-1]
-            last_row = hist.iloc[-1]
-            if pd.isna(last_row['Open']) or pd.isna(last_row['Close']) or pd.isna(last_row['High']) or pd.isna(last_row['Low']):
-                try:
-                    print(f"[{code}] 最新日 {last_idx.strftime('%Y-%m-%d')} のデータに欠損値があるため、period='1d' で再取得を試みます。")
-                    today_hist = ticker.history(period="1d")
-                    if not today_hist.empty:
-                        today_row = today_hist.iloc[-1]
-                        if not (pd.isna(today_row['Open']) or pd.isna(today_row['Close']) or pd.isna(today_row['High']) or pd.isna(today_row['Low'])):
-                            hist.loc[last_idx, 'Open'] = today_row['Open']
-                            hist.loc[last_idx, 'High'] = today_row['High']
-                            hist.loc[last_idx, 'Low'] = today_row['Low']
-                            hist.loc[last_idx, 'Close'] = today_row['Close']
-                            hist.loc[last_idx, 'Volume'] = today_row['Volume']
-                            print(f"[{code}] 最新日のデータを補完しました。")
-                except Exception as ex:
-                    print(f"[{code}] 補完エラー: {ex}")
+            # 【補完】最新日のデータが不完全な場合は、多層補完を実行
+            hist = safe_complement_historical_data(code, ticker, hist)
 
             # 4. データベースのテーブル定義に合わせてデータを整形
             records = []

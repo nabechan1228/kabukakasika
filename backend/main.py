@@ -14,10 +14,12 @@ import logging
 import numpy as np
 import threading
 from sklearn.preprocessing import MinMaxScaler
+import requests
 
 # ---------------------------------------------------------
 # 0. ログの設定
 # ---------------------------------------------------------
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
@@ -114,28 +116,139 @@ def get_macro_data() -> pd.DataFrame:
                 cache_start = (now - dt.timedelta(days=3 * 365)).strftime('%Y-%m-%d')
                 logger.info(f"マクロ指標キャッシュを更新中... (開始日: {cache_start})")
                 
-                # end引数を指定しないことで、今日の最新データまで確実に取得する
-                n225 = yf.download("^N225", start=cache_start)['Close'].squeeze()
-                fx = yf.download("USDJPY=X", start=cache_start)['Close'].squeeze()
-                sp500 = yf.download("^GSPC", start=cache_start)['Close'].squeeze()
+                # セッションを指定せずにアクセスし、マルチインデックスに備えてカラムを平滑化する
+                def download_macro(ticker_symbol):
+                    df = yf.download(ticker_symbol, start=cache_start, progress=False)
+                    if df.empty:
+                        raise ValueError(f"データが空です: {ticker_symbol}")
+                    if isinstance(df.columns, pd.MultiIndex):
+                        df.columns = df.columns.get_level_values(0)
+                    if 'Close' not in df.columns:
+                        raise ValueError(f"Closeカラムが見つかりません: {ticker_symbol}")
+                    series = df['Close'].squeeze()
+                    if isinstance(series.index, pd.DatetimeIndex):
+                        series.index = series.index.tz_localize(None)
+                    return series
+
+                n225 = download_macro("^N225")
+                fx = download_macro("USDJPY=X")
+                sp500 = download_macro("^GSPC")
                 
                 macro_df = pd.DataFrame({
                     'n225_return': n225.pct_change(),
                     'usdjpy_return': fx.pct_change(),
                     'sp500_return': sp500.pct_change()
                 }).reset_index()
-                macro_df['date'] = macro_df['Date'].dt.strftime('%Y-%m-%d')
+                
+                date_col = 'Date' if 'Date' in macro_df.columns else macro_df.columns[0]
+                macro_df['date'] = pd.to_datetime(macro_df[date_col]).dt.strftime('%Y-%m-%d')
                 
                 _macro_cache["data"] = macro_df[['date', 'n225_return', 'usdjpy_return', 'sp500_return']]
                 _macro_cache["last_fetched"] = now
                 logger.info("マクロ指標キャッシュの更新が完了しました。")
             except Exception as e:
-                logger.error(f"マクロ指標のインターネット取得に失敗しました。: {e}")
+                logger.error(f"マクロ指標のインターネット取得に失敗しました。: {e}", exc_info=True)
                 if _macro_cache["data"] is None:
                     # 初回取得失敗時のフォールバック
                     _macro_cache["data"] = pd.DataFrame(columns=['date', 'n225_return', 'usdjpy_return', 'sp500_return'])
         
         return _macro_cache["data"].copy()
+
+# ---------------------------------------------------------
+# 1.57. 最新日データの多層自己補完ヘルパー関数
+# ---------------------------------------------------------
+def safe_complement_historical_data(code: str, ticker: yf.Ticker, hist: pd.DataFrame) -> pd.DataFrame:
+    """
+    yfinance のヒストリカルデータ hist の最終行（最新営業日）に NaN がある場合、
+    1) period="1d" による最新クォートの取得
+    2) ticker.info からのリアルタイム情報取得
+    を順次試みて補完し、日付のズレがないように安全にマージ/上書きして返します。
+    """
+    if hist.empty:
+        return hist
+        
+    last_idx = hist.index[-1]
+    last_row = hist.iloc[-1]
+    
+    # 価格情報のいずれかが NaN の場合に補完処理に入る
+    if pd.isna(last_row['Open']) or pd.isna(last_row['Close']) or pd.isna(last_row['High']) or pd.isna(last_row['Low']):
+        try:
+            logger.info(f"[{code}] 最新日 {last_idx.strftime('%Y-%m-%d')} のデータに欠損値があるため、補完処理を開始します。")
+            
+            today_row = None
+            today_idx = None
+            
+            # 1. period="1d" での再取得を試みる
+            try:
+                today_hist = ticker.history(period="1d")
+                if not today_hist.empty:
+                    t_row = today_hist.iloc[-1]
+                    if not (pd.isna(t_row['Open']) or pd.isna(t_row['Close']) or pd.isna(t_row['High']) or pd.isna(t_row['Low'])):
+                        today_row = t_row
+                        today_idx = today_hist.index[-1]
+                        logger.info(f"[{code}] period='1d' から最新データを取得しました。")
+            except Exception as ex:
+                logger.warning(f"[{code}] period='1d' による補完試行中にエラー: {ex}")
+                
+            # 2. 取得できなかった場合、ticker.info からの取得を試みる
+            if today_row is None:
+                try:
+                    info = ticker.info
+                    o = info.get('open')
+                    h = info.get('dayHigh')
+                    l = info.get('dayLow')
+                    c = info.get('currentPrice') or info.get('regularMarketPrice')
+                    v = info.get('volume') or info.get('regularMarketVolume') or 0
+                    
+                    if o is not None and h is not None and l is not None and c is not None:
+                        today_row = pd.Series({
+                            'Open': float(o),
+                            'High': float(h),
+                            'Low': float(l),
+                            'Close': float(c),
+                            'Volume': int(v) if v is not None and not pd.isna(v) else 0
+                        })
+                        if isinstance(last_idx, pd.Timestamp) and last_idx.tz is not None:
+                            today_idx = pd.Timestamp.now(tz=last_idx.tz).normalize()
+                        else:
+                            today_idx = pd.Timestamp.now().normalize()
+                        logger.info(f"[{code}] ticker.info から最新データを取得しました。")
+                except Exception as ex:
+                    logger.warning(f"[{code}] ticker.info による補完試行中にエラー: {ex}")
+            
+            # 3. 取得できた最新データを用いて hist を上書き/追加補完する
+            if today_row is not None and today_idx is not None:
+                last_date_str = last_idx.strftime('%Y-%m-%d')
+                today_date_str = today_idx.strftime('%Y-%m-%d')
+                
+                if last_date_str == today_date_str:
+                    hist.loc[last_idx, 'Open'] = today_row['Open']
+                    hist.loc[last_idx, 'High'] = today_row['High']
+                    hist.loc[last_idx, 'Low'] = today_row['Low']
+                    hist.loc[last_idx, 'Close'] = today_row['Close']
+                    hist.loc[last_idx, 'Volume'] = today_row['Volume']
+                    logger.info(f"[{code}] 最終行 {last_date_str} のデータを正常に補完（上書き）しました。")
+                else:
+                    tz_today_idx = today_idx
+                    if isinstance(last_idx, pd.Timestamp) and last_idx.tz is not None:
+                        tz_today_idx = today_idx.tz_convert(last_idx.tz) if today_idx.tz is not None else today_idx.tz_localize(last_idx.tz)
+                    
+                    if tz_today_idx not in hist.index:
+                        new_row_df = pd.DataFrame([today_row], index=[tz_today_idx])
+                        hist = pd.concat([hist, new_row_df])
+                        logger.info(f"[{code}] 新たな日付 {today_date_str} の行を追加し、補完しました。")
+                    else:
+                        hist.loc[tz_today_idx, 'Open'] = today_row['Open']
+                        hist.loc[tz_today_idx, 'High'] = today_row['High']
+                        hist.loc[tz_today_idx, 'Low'] = today_row['Low']
+                        hist.loc[tz_today_idx, 'Close'] = today_row['Close']
+                        hist.loc[tz_today_idx, 'Volume'] = today_row['Volume']
+                        logger.info(f"[{code}] 既存の行 {today_date_str} のデータを正常に補完（上書き）しました。")
+        except Exception as e:
+            logger.error(f"[{code}] 補完処理中に予期せぬエラーが発生しました: {e}", exc_info=True)
+            
+    return hist
+
 
 # ---------------------------------------------------------
 # 1.6. 【改善1＆2】特徴量エンジニアリング (変化率＆米国市場追加)
@@ -216,25 +329,9 @@ def get_stock_data(code: str, db: Session = Depends(get_db)):
             ticker = yf.Ticker(f"{code}.T")
             hist = ticker.history(period="3y")
             
-            # 【補完】最新日のデータが不完全な場合は、period='1d' で再取得を試みる
+            # 【補完】最新日のデータが不完全な場合は、多層補完を実行
             if not hist.empty:
-                last_idx = hist.index[-1]
-                last_row = hist.iloc[-1]
-                if pd.isna(last_row['Open']) or pd.isna(last_row['Close']) or pd.isna(last_row['High']) or pd.isna(last_row['Low']):
-                    try:
-                        logger.info(f"[{code}] 新規取得データの最新日 {last_idx.strftime('%Y-%m-%d')} に欠損値があるため、period='1d' で補完を試みます。")
-                        today_hist = ticker.history(period="1d")
-                        if not today_hist.empty:
-                            today_row = today_hist.iloc[-1]
-                            if not (pd.isna(today_row['Open']) or pd.isna(today_row['Close']) or pd.isna(today_row['High']) or pd.isna(today_row['Low'])):
-                                hist.loc[last_idx, 'Open'] = today_row['Open']
-                                hist.loc[last_idx, 'High'] = today_row['High']
-                                hist.loc[last_idx, 'Low'] = today_row['Low']
-                                hist.loc[last_idx, 'Close'] = today_row['Close']
-                                hist.loc[last_idx, 'Volume'] = today_row['Volume']
-                                logger.info(f"[{code}] 最新日データを正常に補完しました。")
-                    except Exception as ex:
-                        logger.error(f"[{code}] 新規取得時の補完エラー: {ex}")
+                hist = safe_complement_historical_data(code, ticker, hist)
 
             records = []
             for index, row in hist.iterrows():
@@ -270,24 +367,8 @@ def get_stock_data(code: str, db: Session = Depends(get_db)):
                 ticker = yf.Ticker(f"{code}.T")
                 hist = ticker.history(start=start_date)
                 if not hist.empty:
-                    # 【補完】最新日のデータが不完全な場合は、period='1d' で再取得を試みる
-                    last_idx = hist.index[-1]
-                    last_row = hist.iloc[-1]
-                    if pd.isna(last_row['Open']) or pd.isna(last_row['Close']) or pd.isna(last_row['High']) or pd.isna(last_row['Low']):
-                        try:
-                            logger.info(f"[{code}] 最新日 {last_idx.strftime('%Y-%m-%d')} のデータに欠損値があるため、period='1d' で再取得を試みます。")
-                            today_hist = ticker.history(period="1d")
-                            if not today_hist.empty:
-                                today_row = today_hist.iloc[-1]
-                                if not (pd.isna(today_row['Open']) or pd.isna(today_row['Close']) or pd.isna(today_row['High']) or pd.isna(today_row['Low'])):
-                                    hist.loc[last_idx, 'Open'] = today_row['Open']
-                                    hist.loc[last_idx, 'High'] = today_row['High']
-                                    hist.loc[last_idx, 'Low'] = today_row['Low']
-                                    hist.loc[last_idx, 'Close'] = today_row['Close']
-                                    hist.loc[last_idx, 'Volume'] = today_row['Volume']
-                                    logger.info(f"[{code}] 最新日のデータを補完しました。")
-                        except Exception as ex:
-                            logger.error(f"[{code}] 補完エラー: {ex}")
+                    # 【補完】最新日のデータが不完全な場合は、多層補完を実行
+                    hist = safe_complement_historical_data(code, ticker, hist)
 
                     records = []
                     for index, row in hist.iterrows():
@@ -451,14 +532,25 @@ def run_training_task(code: str):
         
         # 既存DBへの補完ロジック（省略せずに実行）
         if df.empty or len(df) < 200:
-            hist = yf.Ticker(f"{code}.T").history(period="3y")
+            ticker = yf.Ticker(f"{code}.T")
+            hist = ticker.history(period="3y")
+            if not hist.empty:
+                hist = safe_complement_historical_data(code, ticker, hist)
+                
             with engine.connect() as conn:
                 existing = set(pd.read_sql(text("SELECT date FROM stock_prices WHERE code = :code"), conn, params={"code": code})['date'].tolist()) if not df.empty else set()
             records = []
             for idx, row in hist.iterrows():
                 ds = idx.strftime('%Y-%m-%d')
                 if ds in existing: continue
-                records.append(StockPrice(code=code, date=ds, open=round(row['Open'], 1), high=round(row['High'], 1), low=round(row['Low'], 1), close=round(row['Close'], 1), volume=int(row['Volume'])))
+                if pd.isna(row['Open']) or pd.isna(row['Close']) or pd.isna(row['High']) or pd.isna(row['Low']):
+                    continue
+                records.append(StockPrice(
+                    code=code, date=ds, 
+                    open=round(row['Open'], 1), high=round(row['High'], 1), 
+                    low=round(row['Low'], 1), close=round(row['Close'], 1), 
+                    volume=int(row['Volume']) if pd.notna(row['Volume']) else 0
+                ))
             if records:
                 db.bulk_save_objects(records)
                 db.commit()
