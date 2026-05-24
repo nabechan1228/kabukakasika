@@ -27,6 +27,22 @@ logging.basicConfig(
 logger = logging.getLogger("kabukakasika")
 
 # ---------------------------------------------------------
+# 0.5. タイムアウト付きセッションの定義
+# ---------------------------------------------------------
+def get_timeout_session(timeout=5):
+    from curl_cffi import requests as requests_cffi
+    session = requests_cffi.Session(impersonate="chrome")
+    original_request = session.request
+    def new_request(*args, **kwargs):
+        if 'timeout' not in kwargs:
+            kwargs['timeout'] = timeout
+        return original_request(*args, **kwargs)
+    session.request = new_request
+    return session
+
+yf_session = get_timeout_session(5)
+
+# ---------------------------------------------------------
 # 1. データベースの初期設定
 # ---------------------------------------------------------
 DATABASE_URL = "sqlite:///./stock_data.db"
@@ -118,7 +134,7 @@ def get_macro_data() -> pd.DataFrame:
                 
                 # セッションを指定せずにアクセスし、マルチインデックスに備えてカラムを平滑化する
                 def download_macro(ticker_symbol):
-                    df = yf.download(ticker_symbol, start=cache_start, progress=False)
+                    df = yf.download(ticker_symbol, start=cache_start, progress=False, session=yf_session)
                     if df.empty:
                         raise ValueError(f"データが空です: {ticker_symbol}")
                     if isinstance(df.columns, pd.MultiIndex):
@@ -326,7 +342,7 @@ def get_stock_data(code: str, db: Session = Depends(get_db)):
         with engine.connect() as conn:
             df = pd.read_sql(query, con=conn, params={"code": code})
         if df.empty:
-            ticker = yf.Ticker(f"{code}.T")
+            ticker = yf.Ticker(f"{code}.T", session=yf_session)
             hist = ticker.history(period="3y")
             
             # 【補完】最新日のデータが不完全な場合は、多層補完を実行
@@ -364,7 +380,7 @@ def get_stock_data(code: str, db: Session = Depends(get_db)):
             today = datetime.now().strftime('%Y-%m-%d')
             
             if start_date <= today:
-                ticker = yf.Ticker(f"{code}.T")
+                ticker = yf.Ticker(f"{code}.T", session=yf_session)
                 hist = ticker.history(start=start_date)
                 if not hist.empty:
                     # 【補完】最新日のデータが不完全な場合は、多層補完を実行
@@ -532,7 +548,7 @@ def run_training_task(code: str):
         
         # 既存DBへの補完ロジック（省略せずに実行）
         if df.empty or len(df) < 200:
-            ticker = yf.Ticker(f"{code}.T")
+            ticker = yf.Ticker(f"{code}.T", session=yf_session)
             hist = ticker.history(period="3y")
             if not hist.empty:
                 hist = safe_complement_historical_data(code, ticker, hist)
@@ -677,7 +693,10 @@ def get_stock_info(code: str):
     if not code.isdigit() or len(code) != 4:
         raise HTTPException(status_code=400, detail="銘柄コードは4桁の数字で入力してください")
     try:
-        info = yf.Ticker(f"{code}.T").info
+        ticker = yf.Ticker(f"{code}.T", session=yf_session)
+        info = ticker.info
+        if not info or not isinstance(info, dict):
+            raise ValueError("Empty or invalid info returned")
         return {
             "code": code,
             "name": info.get("longName") or info.get("shortName") or "不明",
@@ -690,8 +709,18 @@ def get_stock_info(code: str):
             "previousClose": info.get("previousClose")
         }
     except Exception as e:
-        logger.error(f"Error fetching info for {code}: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail="企業情報の取得中にエラーが発生しました。")
+        logger.error(f"Error fetching info for {code}: {e}")
+        return {
+            "code": code,
+            "name": "不明",
+            "marketCap": None,
+            "trailingPE": None,
+            "priceToBook": None,
+            "dividendYield": None,
+            "fiftyTwoWeekHigh": None,
+            "fiftyTwoWeekLow": None,
+            "previousClose": None
+        }
 
 if __name__ == "__main__":
     import uvicorn
