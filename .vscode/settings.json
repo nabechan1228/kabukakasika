@@ -1,7 +1,51 @@
 {
+  "python.languageServer": "None",
+  "python.testing.pytestEnabled": false,
+  "python.testing.unittestEnabled": false,
+  "python.testing.nosetestsEnabled": false,
   "python.analysis.exclude": [
     "**/node_modules",
     "**/dist",
-    "**/.venv"
-  ]
+    "**/backend/.venv",
+    "**/.venv",
+    "**/__pycache__",
+    "**/*.db",
+    "**/*.log",
+    "**/*.pth",
+    "**/*.pkl",
+    "**/frontend"
+  ],
+  "python.defaultInterpreterPath": "${workspaceFolder}\\backend\\.venv\\Scripts\\python.exe",
+  "python.experiments.enabled": false,
+  "python.experiments.optOutFrom": [
+    "All"
+  ],
+  "python.analysis.indexing": false,
+  "python.analysis.diagnosticMode": "openFilesOnly",
+  "python.analysis.useLibraryCodeForTypes": false,
+  "python.analysis.typeCheckingMode": "off",
+  "files.exclude": {
+    "**/.git": true,
+    "**/.DS_Store": true,
+    "**/node_modules": true,
+    "**/dist": true,
+    "**/__pycache__": true,
+    "**/*.db": true,
+    "**/*.log": true,
+    "**/*.pth": true,
+    "**/*.pkl": true
+  },
+  "files.watcherExclude": {
+    "**/.git/objects/**": true,
+    "**/.git/subtree-cache/**": true,
+    "**/node_modules/**": true,
+    "**/dist/**": true,
+    "**/backend/.venv/**": true,
+    "**/.venv/**": true,
+    "**/__pycache__/**": true,
+    "**/*.db": true,
+    "**/*.log": true,
+    "**/*.pth": true,
+    "**/*.pkl": true
+  }
 }

@@ -27,20 +27,21 @@ logging.basicConfig(
 logger = logging.getLogger("kabukakasika")
 
 # ---------------------------------------------------------
-# 0.5. タイムアウト付きセッションの定義
+# 0.5. タイムアウト付きセッションの定義 (使用しないためコメントアウト)
 # ---------------------------------------------------------
-def get_timeout_session(timeout=5):
-    from curl_cffi import requests as requests_cffi
-    session = requests_cffi.Session(impersonate="chrome")
-    original_request = session.request
-    def new_request(*args, **kwargs):
-        if 'timeout' not in kwargs:
-            kwargs['timeout'] = timeout
-        return original_request(*args, **kwargs)
-    session.request = new_request
-    return session
+# def get_timeout_session(timeout=5):
+#     from curl_cffi import requests as requests_cffi
+#     session = requests_cffi.Session(impersonate="chrome")
+#     original_request = session.request
+#     def new_request(*args, **kwargs):
+#         if 'timeout' not in kwargs:
+#             kwargs['timeout'] = timeout
+#         return original_request(*args, **kwargs)
+#     session.request = new_request
+#     return session
+# 
+# yf_session = get_timeout_session(5)
 
-yf_session = get_timeout_session(5)
 
 # ---------------------------------------------------------
 # 1. データベースの初期設定
@@ -119,55 +120,65 @@ def get_macro_data() -> pd.DataFrame:
     global _macro_cache
     now = dt.datetime.now()
     
+    # 1. ロック内で更新が必要かどうかのみ判定する
+    need_fetch = False
     with _macro_cache_lock:
-        need_fetch = False
         if _macro_cache["data"] is None or _macro_cache["last_fetched"] is None:
             need_fetch = True
         elif (now - _macro_cache["last_fetched"]).total_seconds() > 3600:  # 1時間キャッシュ
             need_fetch = True
             
-        if need_fetch:
-            try:
-                # 常に過去3年分のマクロデータを一括取得（学習と推論の全範囲をカバー）
-                cache_start = (now - dt.timedelta(days=3 * 365)).strftime('%Y-%m-%d')
-                logger.info(f"マクロ指標キャッシュを更新中... (開始日: {cache_start})")
-                
-                # セッションを指定せずにアクセスし、マルチインデックスに備えてカラムを平滑化する
-                def download_macro(ticker_symbol):
-                    df = yf.download(ticker_symbol, start=cache_start, progress=False, session=yf_session)
-                    if df.empty:
-                        raise ValueError(f"データが空です: {ticker_symbol}")
-                    if isinstance(df.columns, pd.MultiIndex):
-                        df.columns = df.columns.get_level_values(0)
-                    if 'Close' not in df.columns:
-                        raise ValueError(f"Closeカラムが見つかりません: {ticker_symbol}")
-                    series = df['Close'].squeeze()
-                    if isinstance(series.index, pd.DatetimeIndex):
-                        series.index = series.index.tz_localize(None)
-                    return series
+    # 2. ロックの外側で重い通信（ダウンロード）を行う
+    if need_fetch:
+        try:
+            # 常に過去3年分のマクロデータを一括取得（学習と推論の全範囲をカバー）
+            cache_start = (now - dt.timedelta(days=3 * 365)).strftime('%Y-%m-%d')
+            logger.info(f"マクロ指標キャッシュを更新中... (開始日: {cache_start})")
+            
+            # セッションを指定せずにアクセス
+            def download_macro(ticker_symbol):
+                df = yf.download(ticker_symbol, start=cache_start, progress=False)
+                if df.empty:
+                    raise ValueError(f"データが空です: {ticker_symbol}")
+                if isinstance(df.columns, pd.MultiIndex):
+                    df.columns = df.columns.get_level_values(0)
+                if 'Close' not in df.columns:
+                    raise ValueError(f"Closeカラムが見つかりません: {ticker_symbol}")
+                series = df['Close'].squeeze()
+                if isinstance(series.index, pd.DatetimeIndex):
+                    series.index = series.index.tz_localize(None)
+                return series
 
-                n225 = download_macro("^N225")
-                fx = download_macro("USDJPY=X")
-                sp500 = download_macro("^GSPC")
-                
-                macro_df = pd.DataFrame({
-                    'n225_return': n225.pct_change(),
-                    'usdjpy_return': fx.pct_change(),
-                    'sp500_return': sp500.pct_change()
-                }).reset_index()
-                
-                date_col = 'Date' if 'Date' in macro_df.columns else macro_df.columns[0]
-                macro_df['date'] = pd.to_datetime(macro_df[date_col]).dt.strftime('%Y-%m-%d')
-                
-                _macro_cache["data"] = macro_df[['date', 'n225_return', 'usdjpy_return', 'sp500_return']]
+            n225 = download_macro("^N225")
+            fx = download_macro("USDJPY=X")
+            sp500 = download_macro("^GSPC")
+            
+            macro_df = pd.DataFrame({
+                'n225_return': n225.pct_change(),
+                'usdjpy_return': fx.pct_change(),
+                'sp500_return': sp500.pct_change()
+            }).reset_index()
+            
+            date_col = 'Date' if 'Date' in macro_df.columns else macro_df.columns[0]
+            macro_df['date'] = pd.to_datetime(macro_df[date_col]).dt.strftime('%Y-%m-%d')
+            
+            new_data = macro_df[['date', 'n225_return', 'usdjpy_return', 'sp500_return']]
+            
+            # 3. 取得完了後、再度ロックを獲得してキャッシュを更新する
+            with _macro_cache_lock:
+                _macro_cache["data"] = new_data
                 _macro_cache["last_fetched"] = now
-                logger.info("マクロ指標キャッシュの更新が完了しました。")
-            except Exception as e:
-                logger.error(f"マクロ指標のインターネット取得に失敗しました。: {e}", exc_info=True)
+            logger.info("マクロ指標キャッシュの更新が完了しました。")
+        except Exception as e:
+            logger.error(f"マクロ指標のインターネット取得に失敗しました。: {e}", exc_info=True)
+            with _macro_cache_lock:
                 if _macro_cache["data"] is None:
                     # 初回取得失敗時のフォールバック
                     _macro_cache["data"] = pd.DataFrame(columns=['date', 'n225_return', 'usdjpy_return', 'sp500_return'])
-        
+                    _macro_cache["last_fetched"] = now
+
+    # 4. キャッシュされたデータを返す（読み取り時もロックを取得）
+    with _macro_cache_lock:
         return _macro_cache["data"].copy()
 
 # ---------------------------------------------------------
@@ -342,7 +353,7 @@ def get_stock_data(code: str, db: Session = Depends(get_db)):
         with engine.connect() as conn:
             df = pd.read_sql(query, con=conn, params={"code": code})
         if df.empty:
-            ticker = yf.Ticker(f"{code}.T", session=yf_session)
+            ticker = yf.Ticker(f"{code}.T")
             hist = ticker.history(period="3y")
             
             # 【補完】最新日のデータが不完全な場合は、多層補完を実行
@@ -380,7 +391,7 @@ def get_stock_data(code: str, db: Session = Depends(get_db)):
             today = datetime.now().strftime('%Y-%m-%d')
             
             if start_date <= today:
-                ticker = yf.Ticker(f"{code}.T", session=yf_session)
+                ticker = yf.Ticker(f"{code}.T")
                 hist = ticker.history(start=start_date)
                 if not hist.empty:
                     # 【補完】最新日のデータが不完全な場合は、多層補完を実行
@@ -548,7 +559,7 @@ def run_training_task(code: str):
         
         # 既存DBへの補完ロジック（省略せずに実行）
         if df.empty or len(df) < 200:
-            ticker = yf.Ticker(f"{code}.T", session=yf_session)
+            ticker = yf.Ticker(f"{code}.T")
             hist = ticker.history(period="3y")
             if not hist.empty:
                 hist = safe_complement_historical_data(code, ticker, hist)
@@ -693,7 +704,7 @@ def get_stock_info(code: str):
     if not code.isdigit() or len(code) != 4:
         raise HTTPException(status_code=400, detail="銘柄コードは4桁の数字で入力してください")
     try:
-        ticker = yf.Ticker(f"{code}.T", session=yf_session)
+        ticker = yf.Ticker(f"{code}.T")
         info = ticker.info
         if not info or not isinstance(info, dict):
             raise ValueError("Empty or invalid info returned")
