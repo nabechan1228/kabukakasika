@@ -15,7 +15,7 @@
     "**/*.pkl",
     "**/frontend"
   ],
-  "python.defaultInterpreterPath": "${workspaceFolder}\\backend\\.venv\\Scripts\\python.exe",
+  "python.defaultInterpreterPath": "\"python.defaultInterpreterPath\": \"C:\\\\Users\\\\nabe4\\\\kabukakasika\\\\backend\\\\.venv\\\\Scripts\\\\python.exe\"",
   "python.experiments.enabled": false,
   "python.experiments.optOutFrom": [
     "All"
