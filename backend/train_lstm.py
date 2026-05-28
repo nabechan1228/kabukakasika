@@ -1,23 +1,34 @@
+"""
+LSTMモデルのスタンドアロン学習スクリプト（v1: 単純LSTMの基本版）。
+
+注意: このスクリプトは初期開発時のシンプルなLSTMモデルを学習するものです。
+現在のAPIで使用されるAttention付きLSTM (v4) の学習は main.py の
+/api/train/{code} エンドポイントから実行してください。
+
+使い方:
+    python train_lstm.py
+"""
 import torch
 import torch.nn as nn
 import pandas as pd
 import numpy as np
-from sqlalchemy import create_engine
 from sklearn.preprocessing import MinMaxScaler
 import json
+from sqlalchemy import text
+
+# 共通モジュールからインポート
+from db import engine
 
 # ---------------------------------------------
 # 1. データ準備と前処理
 # ---------------------------------------------
 # ターゲット銘柄（例としてトヨタを指定。将来的にはループ処理で全銘柄対応可能）
 TARGET_CODE = "7203"
-DATABASE_URL = "sqlite:///./stock_data.db"
 
 print(f"[{TARGET_CODE}] のデータを読み込んでいます...")
-from sqlalchemy import text
-engine = create_engine(DATABASE_URL)
 query = text("SELECT date, close FROM stock_prices WHERE code = :code ORDER BY date ASC")
-df = pd.read_sql(query, con=engine.connect(), params={"code": TARGET_CODE})
+with engine.connect() as conn:
+    df = pd.read_sql(query, con=conn, params={"code": TARGET_CODE})
 
 if len(df) < 100:
     raise ValueError("学習に十分なデータがありません。")
@@ -29,7 +40,6 @@ prices = df['close'].values.reshape(-1, 1)
 scaler = MinMaxScaler(feature_range=(0, 1))
 scaled_prices = scaler.fit_transform(prices)
 
-# スケーラーを保存（FastAPIでの推論時、予測値を元の株価のスケールに戻すために必須です）
 # スケーラーを保存（FastAPIでの推論時、予測値を元の株価のスケールに戻すために必須です。安全なJSON形式で保存します）
 scaler_data = {
     "data_min": scaler.data_min_.tolist(),
@@ -85,7 +95,7 @@ model = StockLSTM()
 # ---------------------------------------------
 # 4. 学習ループ
 # ---------------------------------------------
-criterion = nn.MSELoss() # 回帰タスクなので平均二乗誤差
+criterion = nn.MSELoss()  # 回帰タスクなので平均二乗誤差
 optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
 
 EPOCHS = 50

@@ -66,10 +66,6 @@ export default function StockSearchBox({ onSelect, initialCode }: StockSearchBox
           setQuery(e.target.value);
           setIsOpen(true);
         }}
-        onFocus={(e) => {
-          setIsOpen(true);
-          e.target.select(); // フォーカス時にテキストを全選択する（上書き入力しやすくするため）
-        }}
         onClick={(e) => {
           (e.target as HTMLInputElement).select(); // クリック時にも全選択する
         }}
@@ -89,7 +85,7 @@ export default function StockSearchBox({ onSelect, initialCode }: StockSearchBox
         }}
         onFocus={(e) => {
           setIsOpen(true);
-          e.target.select();
+          e.target.select(); // フォーカス時にテキストを全選択する（上書き入力しやすくするため）
           e.target.style.border = '1px solid var(--accent-cyan)';
           e.target.style.boxShadow = '0 0 10px rgba(6, 182, 212, 0.5)';
         }}

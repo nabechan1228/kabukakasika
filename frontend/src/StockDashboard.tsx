@@ -1,4 +1,5 @@
 import { useState, useEffect, useMemo, useRef } from 'react';
+import type { StockData, StockInfo, WatchlistItem, TrainingStatus } from './types';
 import {
   LineChart,
   Line,
@@ -23,7 +24,7 @@ const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 // =========================================================
 // カスタムツールチップ (金融ターミナル風のプロフェッショナルな情報表示)
 // =========================================================
-const CustomTooltip = ({ active, payload }: any) => {
+const CustomTooltip = ({ active, payload }: { active?: boolean; payload?: Array<{ payload: Record<string, any> }> }) => {
   if (active && payload && payload.length) {
     const data = payload[0].payload;
     const isPred = data.type === 'prediction';
@@ -115,17 +116,17 @@ const CustomTooltip = ({ active, payload }: any) => {
 
 export default function StockDashboard() {
   const [selectedCode, setSelectedCode] = useState<string>("7203");
-  const [stockData, setStockData] = useState<any[]>([]);
-  const [stockInfo, setStockInfo] = useState<any>(null); // 企業情報
-  const [watchlist, setWatchlist] = useState<{code: string, name: string}[]>([]); // ウォッチリスト
+  const [stockData, setStockData] = useState<StockData[]>([]);
+  const [stockInfo, setStockInfo] = useState<StockInfo | null>(null);
+  const [watchlist, setWatchlist] = useState<WatchlistItem[]>([]);
   
   const [loading, setLoading] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
   const [prediction, setPrediction] = useState<number | null>(null);
   const [predictions, setPredictions] = useState<number[]>([]);
-  const [mape, setMape] = useState<number | null>(null); // 予測精度 (MAPE)
+  const [mape, setMape] = useState<number | null>(null);
   const [training, setTraining] = useState<boolean>(false);
-  const [trainingStatus, setTrainingStatus] = useState<{ status: string; progress: number; message: string }>({ status: 'idle', progress: 0, message: '' });
+  const [trainingStatus, setTrainingStatus] = useState<TrainingStatus>({ status: 'idle', progress: 0, message: '' });
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // コンポーネントunmount時にポーリングをクリーンアップ
@@ -147,11 +148,19 @@ export default function StockDashboard() {
   const [showRSI, setShowRSI] = useState<boolean>(true);   // RSI
   const [showMACD, setShowMACD] = useState<boolean>(true); // MACD
 
-  // ウォッチリストのロード
+  // ウォッチリストのロード（データ破損に対する安全なパース）
   useEffect(() => {
     const saved = localStorage.getItem('kabukakasika_watchlist');
     if (saved) {
-      setWatchlist(JSON.parse(saved));
+      try {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed)) {
+          setWatchlist(parsed);
+        }
+      } catch {
+        // データが破損している場合は無視して初期値を使用
+        localStorage.removeItem('kabukakasika_watchlist');
+      }
     }
   }, []);
 

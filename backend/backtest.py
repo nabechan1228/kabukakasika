@@ -1,52 +1,52 @@
+"""
+バックテストスクリプト: 過去の株価データに対してモデルの予測精度を評価する。
+
+使い方:
+    python backtest.py
+"""
 import os
-import json
 import torch
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-from sqlalchemy import create_engine, text
-from sklearn.preprocessing import MinMaxScaler
+from sqlalchemy import text
 
-# main.py からクラスや関数をインポート（同じフォルダにある前提）
-from main import (
-    StockAttentionLSTM, compute_features, extract_feature_matrix, 
-    FEATURE_COUNT, SEQ_LENGTH, engine
+# 共通モジュールからインポート
+from db import engine
+from models import (
+    StockAttentionLSTM, FEATURE_COUNT, SEQ_LENGTH,
+    restore_scaler, load_model
 )
+from features import compute_features, extract_feature_matrix
+from validators import get_model_path, get_scaler_path
+
 
 def run_backtest(code: str, test_days: int = 30):
     print(f"[{code}] バックテストを開始します（テスト期間: 過去 {test_days} 営業日）...")
 
-    model_path = f"lstm_model_{code}.pth"
-    scaler_path = f"scaler_{code}.json"
+    model_path = get_model_path(code)
+    scaler_path = get_scaler_path(code)
 
     if not os.path.exists(model_path) or not os.path.exists(scaler_path):
         print("モデルまたはスケーラーが見つかりません。先に学習を行ってください。")
         return
 
-    # 1. メタデータとスケーラーの復元
-    with open(scaler_path, "r") as f:
-        si = json.load(f)
-    
-    scaler = MinMaxScaler(feature_range=(0, 1))
-    scaler.data_min_ = np.array(si["data_min"])
-    scaler.data_max_ = np.array(si["data_max"])
-    scaler.data_range_ = scaler.data_max_ - scaler.data_min_
-    scaler.scale_ = 1.0 / np.where(scaler.data_range_ == 0, 1, scaler.data_range_)
-    scaler.min_ = 0.0 - scaler.data_min_ * scaler.scale_
+    # 1. スケーラーとモデルの復元（共通ヘルパー使用）
+    scaler, si = restore_scaler(scaler_path)
+    model = load_model(model_path, input_size=si.get("input_size", FEATURE_COUNT))
 
     ret_min, ret_max = scaler.data_min_[0], scaler.data_max_[0]
     ret_range = ret_max - ret_min
 
-    # 2. モデルのロード
-    model = StockAttentionLSTM(input_size=si.get("input_size", FEATURE_COUNT))
-    model.load_state_dict(torch.load(model_path, weights_only=True))
-    model.eval()
-
-    # 3. データの準備（テスト期間＋シーケンス長＋特徴量計算の余白分を取得）
+    # 2. データの準備（テスト期間＋シーケンス長＋特徴量計算の余白分を取得）
+    # 【修正】SQLインジェクション対策: パラメータバインドを使用
     limit = test_days + SEQ_LENGTH + 60
-    query = text(f"SELECT date, close, volume FROM stock_prices WHERE code = '{code}' ORDER BY date DESC LIMIT {limit}")
+    query = text(
+        "SELECT date, close, volume FROM stock_prices "
+        "WHERE code = :code ORDER BY date DESC LIMIT :limit"
+    )
     with engine.connect() as conn:
-        df = pd.read_sql(query, con=conn)
+        df = pd.read_sql(query, con=conn, params={"code": code, "limit": limit})
     
     df = df.iloc[::-1].reset_index(drop=True)
     df = compute_features(df)
@@ -56,7 +56,7 @@ def run_backtest(code: str, test_days: int = 30):
     fm = extract_feature_matrix(valid_df)
     scaled_fm = scaler.transform(fm)
 
-    # 4. バックテストの実行
+    # 3. バックテストの実行
     results = []
     
     # valid_df の後ろから test_days 分をテスト対象とする
@@ -71,7 +71,7 @@ def run_backtest(code: str, test_days: int = 30):
         seq_end = i
         
         if seq_start < 0:
-            continue # データ不足
+            continue  # データ不足
             
         seq = scaled_fm[seq_start:seq_end]
         xt = torch.tensor(seq, dtype=torch.float32).unsqueeze(0)
@@ -99,7 +99,7 @@ def run_backtest(code: str, test_days: int = 30):
             'correct_dir': correct_dir
         })
 
-    # 5. 評価指標の計算と結果表示
+    # 4. 評価指標の計算と結果表示
     res_df = pd.DataFrame(results)
     
     mae = np.mean(np.abs(res_df['actual'] - res_df['predicted']))
@@ -114,7 +114,7 @@ def run_backtest(code: str, test_days: int = 30):
     print(f"RMSE (二乗平均平方根誤差): {rmse:.1f} 円")
     print("="*40)
 
-    # 6. グラフの描画
+    # 5. グラフの描画
     plt.figure(figsize=(12, 6))
     plt.plot(res_df['date'], res_df['actual'], label='Actual Price', color='black', marker='o', markersize=4)
     plt.plot(res_df['date'], res_df['predicted'], label='Predicted Price (1-day ahead)', color='red', linestyle='--', marker='x', markersize=4)
@@ -127,6 +127,7 @@ def run_backtest(code: str, test_days: int = 30):
     plt.grid(True, linestyle=':', alpha=0.6)
     plt.tight_layout()
     plt.show()
+
 
 if __name__ == "__main__":
     # 例としてトヨタ（7203）の過去30営業日をテスト

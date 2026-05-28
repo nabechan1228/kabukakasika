@@ -1,20 +1,31 @@
+"""
+kabukakasika バックエンド - FastAPI メインアプリケーション
+
+株価データの取得・保存、AI予測（Attention LSTM）、モデル学習のAPIを提供する。
+"""
 from fastapi import FastAPI, HTTPException, Depends, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 import yfinance as yf
 import pandas as pd
-from sqlalchemy import create_engine, Column, String, Float, Integer, text
-from sqlalchemy.orm import declarative_base, sessionmaker, Session
+from sqlalchemy import text
+from sqlalchemy.orm import Session
 import os
 import datetime as dt
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
 import json
 import logging
 import numpy as np
 import threading
 from sklearn.preprocessing import MinMaxScaler
-import requests
+
+# --- 共通モジュール ---
+from db import engine, SessionLocal, StockPrice, get_db
+from validators import validate_stock_code, get_model_path, get_scaler_path
+from models import (
+    StockAttentionLSTM, FEATURE_COUNT, SEQ_LENGTH, PREDICT_DAYS,
+    restore_scaler, load_model
+)
+from features import compute_features, extract_feature_matrix
 
 # ---------------------------------------------------------
 # 0. ログの設定
@@ -27,162 +38,7 @@ logging.basicConfig(
 logger = logging.getLogger("kabukakasika")
 
 # ---------------------------------------------------------
-# 0.5. タイムアウト付きセッションの定義 (使用しないためコメントアウト)
-# ---------------------------------------------------------
-# def get_timeout_session(timeout=5):
-#     from curl_cffi import requests as requests_cffi
-#     session = requests_cffi.Session(impersonate="chrome")
-#     original_request = session.request
-#     def new_request(*args, **kwargs):
-#         if 'timeout' not in kwargs:
-#             kwargs['timeout'] = timeout
-#         return original_request(*args, **kwargs)
-#     session.request = new_request
-#     return session
-# 
-# yf_session = get_timeout_session(5)
-
-
-# ---------------------------------------------------------
-# 1. データベースの初期設定
-# ---------------------------------------------------------
-DATABASE_URL = "sqlite:///./stock_data.db"
-engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-Base = declarative_base()
-
-class StockPrice(Base):
-    __tablename__ = "stock_prices"
-    id = Column(Integer, primary_key=True, index=True, autoincrement=True)
-    code = Column(String, index=True)
-    date = Column(String, index=True)
-    open = Column(Float)
-    high = Column(Float)
-    low = Column(Float)
-    close = Column(Float)
-    volume = Column(Integer)
-
-Base.metadata.create_all(bind=engine)
-
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
-
-# ---------------------------------------------------------
-# 1.5. 【改善3】Attention付き LSTMモデル (v4: 8次元マクロ・変化率対応)
-# ---------------------------------------------------------
-FEATURE_COUNT = 8  # [close_return, volume_norm, sma5_dev, rsi, macd, n225_return, usdjpy_return, sp500_return]
-SEQ_LENGTH = 60
-PREDICT_DAYS = 5
-
-class Attention(nn.Module):
-    def __init__(self, hidden_size):
-        super(Attention, self).__init__()
-        # Attentionの重みを計算するための層
-        self.attention = nn.Linear(hidden_size, 1, bias=False)
-
-    def forward(self, lstm_outputs):
-        # lstm_outputs: (batch_size, seq_length, hidden_size)
-        attn_weights = F.softmax(self.attention(lstm_outputs), dim=1) # (batch, seq, 1)
-        # 重みと出力を掛け合わせてコンテキストベクトルを生成
-        context_vector = torch.sum(attn_weights * lstm_outputs, dim=1) # (batch, hidden_size)
-        return context_vector, attn_weights
-
-class StockAttentionLSTM(nn.Module):
-    def __init__(self, input_size=FEATURE_COUNT, hidden_size=64, num_layers=2, dropout=0.3):
-        super(StockAttentionLSTM, self).__init__()
-        self.lstm = nn.LSTM(
-            input_size, hidden_size, num_layers,
-            batch_first=True, dropout=dropout if num_layers > 1 else 0
-        )
-        self.attention = Attention(hidden_size)
-        self.dropout = nn.Dropout(dropout)
-        self.fc = nn.Linear(hidden_size, PREDICT_DAYS) # 未来5日分の「変化率」を出力
-
-    def forward(self, x):
-        out, _ = self.lstm(x)
-        # 最後の出力だけを使うのではなく、Attentionで全期間から重要な情報を抽出
-        context, attn_weights = self.attention(out)
-        context = self.dropout(context)
-        predictions = self.fc(context)
-        return predictions
-
-# ---------------------------------------------------------
-# 1.55. マクロ指標のグローバルキャッシュ
-# ---------------------------------------------------------
-_macro_cache_lock = threading.Lock()
-_macro_cache = {"last_fetched": None, "data": None}
-
-def get_macro_data() -> pd.DataFrame:
-    global _macro_cache
-    now = dt.datetime.now()
-    
-    # 1. ロック内で更新が必要かどうかのみ判定する
-    need_fetch = False
-    with _macro_cache_lock:
-        if _macro_cache["data"] is None or _macro_cache["last_fetched"] is None:
-            need_fetch = True
-        elif (now - _macro_cache["last_fetched"]).total_seconds() > 3600:  # 1時間キャッシュ
-            need_fetch = True
-            
-    # 2. ロックの外側で重い通信（ダウンロード）を行う
-    if need_fetch:
-        try:
-            # 常に過去3年分のマクロデータを一括取得（学習と推論の全範囲をカバー）
-            cache_start = (now - dt.timedelta(days=3 * 365)).strftime('%Y-%m-%d')
-            logger.info(f"マクロ指標キャッシュを更新中... (開始日: {cache_start})")
-            
-            # セッションを指定せずにアクセス
-            def download_macro(ticker_symbol):
-                df = yf.download(ticker_symbol, start=cache_start, progress=False)
-                if df.empty:
-                    raise ValueError(f"データが空です: {ticker_symbol}")
-                if isinstance(df.columns, pd.MultiIndex):
-                    df.columns = df.columns.get_level_values(0)
-                if 'Close' not in df.columns:
-                    raise ValueError(f"Closeカラムが見つかりません: {ticker_symbol}")
-                series = df['Close'].squeeze()
-                if isinstance(series.index, pd.DatetimeIndex):
-                    series.index = series.index.tz_localize(None)
-                return series
-
-            n225 = download_macro("^N225")
-            fx = download_macro("USDJPY=X")
-            sp500 = download_macro("^GSPC")
-            
-            macro_df = pd.DataFrame({
-                'n225_return': n225.pct_change(),
-                'usdjpy_return': fx.pct_change(),
-                'sp500_return': sp500.pct_change()
-            }).reset_index()
-            
-            date_col = 'Date' if 'Date' in macro_df.columns else macro_df.columns[0]
-            macro_df['date'] = pd.to_datetime(macro_df[date_col]).dt.strftime('%Y-%m-%d')
-            
-            new_data = macro_df[['date', 'n225_return', 'usdjpy_return', 'sp500_return']]
-            
-            # 3. 取得完了後、再度ロックを獲得してキャッシュを更新する
-            with _macro_cache_lock:
-                _macro_cache["data"] = new_data
-                _macro_cache["last_fetched"] = now
-            logger.info("マクロ指標キャッシュの更新が完了しました。")
-        except Exception as e:
-            logger.error(f"マクロ指標のインターネット取得に失敗しました。: {e}", exc_info=True)
-            with _macro_cache_lock:
-                if _macro_cache["data"] is None:
-                    # 初回取得失敗時のフォールバック
-                    _macro_cache["data"] = pd.DataFrame(columns=['date', 'n225_return', 'usdjpy_return', 'sp500_return'])
-                    _macro_cache["last_fetched"] = now
-
-    # 4. キャッシュされたデータを返す（読み取り時もロックを取得）
-    with _macro_cache_lock:
-        return _macro_cache["data"].copy()
-
-# ---------------------------------------------------------
-# 1.57. 最新日データの多層自己補完ヘルパー関数
+# 1. 最新日データの多層自己補完ヘルパー関数
 # ---------------------------------------------------------
 def safe_complement_historical_data(code: str, ticker: yf.Ticker, hist: pd.DataFrame) -> pd.DataFrame:
     """
@@ -278,165 +134,179 @@ def safe_complement_historical_data(code: str, ticker: yf.Ticker, hist: pd.DataF
 
 
 # ---------------------------------------------------------
-# 1.6. 【改善1＆2】特徴量エンジニアリング (変化率＆米国市場追加)
+# 2. yfinance から取得した株価データをDBに保存するヘルパー
 # ---------------------------------------------------------
-def compute_features(df: pd.DataFrame) -> pd.DataFrame:
-    # 【改善1】価格そのものではなく「前日からの変化率」をメイン特徴量にする
-    df['close_return'] = df['close'].pct_change()
-    
-    sma5 = df['close'].rolling(window=5).mean()
-    df['sma5_dev'] = ((df['close'] - sma5) / sma5) * 100
+def _is_row_complete(row) -> bool:
+    """株価行データの価格情報が完全かどうかチェックする。"""
+    return not (pd.isna(row['Open']) or pd.isna(row['Close']) or pd.isna(row['High']) or pd.isna(row['Low']))
 
+
+def _hist_to_records(code: str, hist: pd.DataFrame, skip_before: str | None = None) -> list[StockPrice]:
+    """
+    yfinanceのヒストリカルDataFrameからStockPriceレコードのリストを生成する。
+
+    Args:
+        code: 銘柄コード
+        hist: yfinanceのhistory結果
+        skip_before: この日付以前のデータをスキップする（差分更新用）
+
+    Returns:
+        StockPriceオブジェクトのリスト
+    """
+    records = []
+    for index, row in hist.iterrows():
+        date_str = index.strftime('%Y-%m-%d')
+        
+        # 指定日以前のデータをスキップ
+        if skip_before and date_str <= skip_before:
+            continue
+        
+        # NaN が含まれている行は登録をスキップする
+        if not _is_row_complete(row):
+            logger.warning(f"[{code}] {date_str} の価格データが不完全なため、登録をスキップします。")
+            continue
+            
+        records.append(StockPrice(
+            code=code, date=date_str,
+            open=round(row['Open'], 1), high=round(row['High'], 1),
+            low=round(row['Low'], 1), close=round(row['Close'], 1),
+            volume=int(row['Volume']) if pd.notna(row['Volume']) else 0
+        ))
+    return records
+
+
+def _compute_technical_indicators(df: pd.DataFrame) -> pd.DataFrame:
+    """APIレスポンス用のテクニカル指標（SMA, BB, RSI, MACD）を計算する。"""
+    df['SMA_5'] = df['close'].rolling(window=5).mean()
+    df['SMA_25'] = df['close'].rolling(window=25).mean()
+    std_25 = df['close'].rolling(window=25).std()
+    df['BB_Upper'] = df['SMA_25'] + (std_25 * 2)
+    df['BB_Lower'] = df['SMA_25'] - (std_25 * 2)
+
+    # RSI 計算
     delta = df['close'].diff()
-    gain = delta.where(delta > 0, 0).rolling(window=14).mean()
+    gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
     loss_s = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
     rs = gain / loss_s
-    df['rsi'] = 100 - (100 / (1 + rs))
+    df['RSI'] = 100 - (100 / (1 + rs))
 
-    df['macd'] = df['close'].ewm(span=12, adjust=False).mean() - df['close'].ewm(span=26, adjust=False).mean()
-    vol_max = df['volume'].max()
-    df['volume_norm'] = df['volume'] / vol_max if vol_max > 0 else 0
+    # MACD 計算
+    exp1 = df['close'].ewm(span=12, adjust=False).mean()
+    exp2 = df['close'].ewm(span=26, adjust=False).mean()
+    df['MACD'] = exp1 - exp2
+    df['Signal_Line'] = df['MACD'].ewm(span=9, adjust=False).mean()
 
-    try:
-        # キャッシュからマクロ指標をマージ
-        macro_df = get_macro_data()
-        df = pd.merge(df, macro_df, on='date', how='left')
-    except Exception as e:
-        logger.error(f"マクロ指標の結合に失敗しました: {e}")
-        df['n225_return'] = 0
-        df['usdjpy_return'] = 0
-        df['sp500_return'] = 0
-
-    df.fillna(0, inplace=True) # NaNをゼロで埋める
     return df
 
-def extract_feature_matrix(df: pd.DataFrame) -> np.ndarray:
-    # ※ 'close' が消え、'close_return' と 'sp500_return' が入っています
-    cols = ['close_return', 'volume_norm', 'sma5_dev', 'rsi', 'macd', 'n225_return', 'usdjpy_return', 'sp500_return']
-    return df[cols].values
 
 # ---------------------------------------------------------
-# 1.8. スレッド安全な学習ステータス管理
+# 3. スレッド安全な学習ステータス管理
 # ---------------------------------------------------------
 _training_lock = threading.Lock()
 training_status = {}
+
 
 def update_status(code: str, data: dict):
     with _training_lock:
         training_status[code] = data
 
+
 def get_status_safe(code: str) -> dict:
     with _training_lock:
         return training_status.get(code, {"status": "idle", "progress": 0, "message": "未学習"}).copy()
 
-# ---------------------------------------------------------
-# 2. FastAPI アプリケーション設定
-# ---------------------------------------------------------
-app = FastAPI()
 
-ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173,http://localhost:3000").split(",")
+def _is_training(code: str) -> bool:
+    """指定銘柄が現在学習中かどうかを確認する。"""
+    with _training_lock:
+        status = training_status.get(code, {})
+        return status.get("status") == "training"
+
+
+# ---------------------------------------------------------
+# 4. FastAPI アプリケーション設定
+# ---------------------------------------------------------
+app = FastAPI(
+    title="kabukakasika API",
+    description="日本株の株価データ取得・AI予測API",
+    version="2.0.0"
+)
+
+ALLOWED_ORIGINS = os.getenv(
+    "ALLOWED_ORIGINS",
+    "http://localhost:5173,http://127.0.0.1:5173,http://localhost:3000"
+).split(",")
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST"],
     allow_headers=["*"],
 )
 
-# --- (既存の get_stock_data APIは変更なしのため省略せずにそのまま使います) ---
+# ---------------------------------------------------------
+# 5. 株価データ取得 API
+# ---------------------------------------------------------
+STOCK_DATA_QUERY = text(
+    "SELECT date, open, high, low, close, volume FROM stock_prices "
+    "WHERE code = :code ORDER BY date ASC"
+)
+
+
 @app.get("/api/stock/{code}")
 def get_stock_data(code: str, db: Session = Depends(get_db)):
-    if not code.isalnum() or len(code) != 4:
-        raise HTTPException(status_code=400, detail="銘柄コードは4桁で入力")
+    code = validate_stock_code(code)
+    
     try:
-        query = text("SELECT date, open, high, low, close, volume FROM stock_prices WHERE code = :code ORDER BY date ASC")
         with engine.connect() as conn:
-            df = pd.read_sql(query, con=conn, params={"code": code})
+            df = pd.read_sql(STOCK_DATA_QUERY, con=conn, params={"code": code})
+        
         if df.empty:
+            # 初回取得: yfinanceから3年分のデータを取得してDBに保存
             ticker = yf.Ticker(f"{code}.T")
             hist = ticker.history(period="3y")
             
-            # 【補完】最新日のデータが不完全な場合は、多層補完を実行
             if not hist.empty:
                 hist = safe_complement_historical_data(code, ticker, hist)
-
-            records = []
-            for index, row in hist.iterrows():
-                # NaN が含まれている行は登録をスキップする
-                if pd.isna(row['Open']) or pd.isna(row['Close']) or pd.isna(row['High']) or pd.isna(row['Low']):
-                    continue
-                records.append(StockPrice(
-                    code=code, date=index.strftime('%Y-%m-%d'),
-                    open=round(row['Open'], 1), high=round(row['High'], 1),
-                    low=round(row['Low'], 1), close=round(row['Close'], 1), volume=int(row['Volume'])
-                ))
-            db.bulk_save_objects(records)
-            db.commit()
-            with engine.connect() as conn:
-                df = pd.read_sql(query, con=conn, params={"code": code})
-        else:
-            # 既存データがある場合、差分データを自動で取得・更新
-            from datetime import datetime
             
-            # 【堅牢化】以前に不完全なデータ（価格が空）が保存されている場合は削除して再取得を促す
-            db.execute(text("DELETE FROM stock_prices WHERE code = :code AND (open IS NULL OR close IS NULL)"), {"code": code})
+            records = _hist_to_records(code, hist)
+            if records:
+                db.bulk_save_objects(records)
+                db.commit()
+            
+            with engine.connect() as conn:
+                df = pd.read_sql(STOCK_DATA_QUERY, con=conn, params={"code": code})
+        else:
+            # 差分更新: 既存データがある場合、最新データのみ取得
+            # 不完全なデータ（価格が空）を先にクリーンアップ
+            db.execute(
+                text("DELETE FROM stock_prices WHERE code = :code AND (open IS NULL OR close IS NULL)"),
+                {"code": code}
+            )
             db.commit()
             
             # 削除後に再度データを読み直して最新日を取得
             with engine.connect() as conn:
-                df = pd.read_sql(query, con=conn, params={"code": code})
+                df = pd.read_sql(STOCK_DATA_QUERY, con=conn, params={"code": code})
             
             last_date_str = df['date'].max()
-            start_date = last_date_str
-            today = datetime.now().strftime('%Y-%m-%d')
+            today = dt.datetime.now().strftime('%Y-%m-%d')
             
-            if start_date <= today:
+            if last_date_str <= today:
                 ticker = yf.Ticker(f"{code}.T")
-                hist = ticker.history(start=start_date)
+                hist = ticker.history(start=last_date_str)
                 if not hist.empty:
-                    # 【補完】最新日のデータが不完全な場合は、多層補完を実行
                     hist = safe_complement_historical_data(code, ticker, hist)
-
-                    records = []
-                    for index, row in hist.iterrows():
-                        date_str = index.strftime('%Y-%m-%d')
-                        if date_str <= last_date_str:
-                            continue
-                        
-                        # 価格データが NaN（不完全なデータ）の場合はDB登録をスキップする
-                        if pd.isna(row['Open']) or pd.isna(row['Close']) or pd.isna(row['High']) or pd.isna(row['Low']):
-                            logger.warning(f"[{code}] {date_str} の価格データが不完全なため、登録をスキップします。")
-                            continue
-                            
-                        records.append(StockPrice(
-                            code=code, date=date_str,
-                            open=round(row['Open'], 1), high=round(row['High'], 1),
-                            low=round(row['Low'], 1), close=round(row['Close'], 1), volume=int(row['Volume'])
-                        ))
+                    records = _hist_to_records(code, hist, skip_before=last_date_str)
                     if records:
                         db.bulk_save_objects(records)
                         db.commit()
                         with engine.connect() as conn:
-                            df = pd.read_sql(query, con=conn, params={"code": code})
-        
-        df['SMA_5'] = df['close'].rolling(window=5).mean()
-        df['SMA_25'] = df['close'].rolling(window=25).mean()
-        std_25 = df['close'].rolling(window=25).std()
-        df['BB_Upper'] = df['SMA_25'] + (std_25 * 2)
-        df['BB_Lower'] = df['SMA_25'] - (std_25 * 2)
+                            df = pd.read_sql(STOCK_DATA_QUERY, con=conn, params={"code": code})
 
-        # RSI 計算
-        delta = df['close'].diff()
-        gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-        loss_s = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-        rs = gain / loss_s
-        df['RSI'] = 100 - (100 / (1 + rs))
-
-        # MACD 計算
-        exp1 = df['close'].ewm(span=12, adjust=False).mean()
-        exp2 = df['close'].ewm(span=26, adjust=False).mean()
-        df['MACD'] = exp1 - exp2
-        df['Signal_Line'] = df['MACD'].ewm(span=9, adjust=False).mean()
+        # テクニカル指標を計算
+        df = _compute_technical_indicators(df)
 
         df = df.tail(60).where(pd.notna(df), None)
         
@@ -459,24 +329,35 @@ def get_stock_data(code: str, db: Session = Depends(get_db)):
                 "macdSignal": cv(row['Signal_Line'])
             })
         return data
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error(f"Error fetching stock: {e}")
-        raise HTTPException(status_code=500, detail="エラー")
+        logger.error(f"Error fetching stock {code}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="株価データの取得中にエラーが発生しました。")
+
 
 # ---------------------------------------------------------
-# 💡 推論エンドポイント (変化率から実価格への復元)
+# 6. AI 推論エンドポイント (変化率から実価格への復元)
 # ---------------------------------------------------------
 @app.get("/api/predict/{code}")
 def predict_stock(code: str):
-    model_path = f"lstm_model_{code}.pth"
-    scaler_path = f"scaler_{code}.json"
+    code = validate_stock_code(code)
+    
+    model_path = get_model_path(code)
+    scaler_path = get_scaler_path(code)
 
     if not os.path.exists(model_path) or not os.path.exists(scaler_path):
         return {"code": code, "prediction": None, "predictions": [], "mape": None, "message": "学習モデルがありません"}
 
     try:
-        with open(scaler_path, "r") as f:
-            si = json.load(f)
+        # スケーラー復元（共通ヘルパー使用）
+        try:
+            scaler, si = restore_scaler(scaler_path)
+        except ValueError as ve:
+            return {
+                "code": code, "prediction": None, "predictions": [],
+                "mape": None, "message": str(ve)
+            }
 
         # 最新データを多めに取得して前処理
         query = text("SELECT date, close, volume FROM stock_prices WHERE code = :code ORDER BY date DESC LIMIT 120")
@@ -490,25 +371,6 @@ def predict_stock(code: str):
         df = compute_features(df)
         fm = extract_feature_matrix(df)
 
-        # スケーラー復元
-        scaler = MinMaxScaler(feature_range=(0, 1))
-        scaler.data_min_ = np.array(si["data_min"])
-        scaler.data_max_ = np.array(si["data_max"])
-
-        # 旧バージョンのスケーラーとの次元不一致によるエラーを防ぐ
-        if len(scaler.data_min_) != FEATURE_COUNT:
-            return {
-                "code": code,
-                "prediction": None,
-                "predictions": [],
-                "mape": None,
-                "message": "モデルのバージョンが異なります。再学習を行ってください。"
-            }
-
-        scaler.data_range_ = scaler.data_max_ - scaler.data_min_
-        scaler.scale_ = 1.0 / np.where(scaler.data_range_ == 0, 1, scaler.data_range_)
-        scaler.min_ = 0.0 - scaler.data_min_ * scaler.scale_
-
         # ターゲットはインデックス0（close_return）
         ret_min, ret_max = scaler.data_min_[0], scaler.data_max_[0]
         ret_range = ret_max - ret_min
@@ -518,9 +380,7 @@ def predict_stock(code: str):
         seq = scaled[-SEQ_LENGTH:].copy()
         xt = torch.tensor(seq, dtype=torch.float32).unsqueeze(0)
 
-        model = StockAttentionLSTM(input_size=si.get("input_size", FEATURE_COUNT))
-        model.load_state_dict(torch.load(model_path, weights_only=True))
-        model.eval()
+        model = load_model(model_path, input_size=si.get("input_size", FEATURE_COUNT))
 
         with torch.no_grad():
             preds_scaled_returns = model(xt).numpy().flatten()
@@ -528,11 +388,11 @@ def predict_stock(code: str):
         # スケールされた変化率を、実際の中身（例: 0.015 = 1.5%）に戻す
         actual_returns = [(p * ret_range + ret_min) for p in preds_scaled_returns]
 
-        # 【重要】変化率の予測値から、未来の実価格を計算する
+        # 変化率の予測値から、未来の実価格を計算する
         predicted_prices = []
         current_price = last_actual_price
         for r in actual_returns:
-            current_price = current_price * (1 + r) # 前日価格 × (1 + 変化率)
+            current_price = current_price * (1 + r)  # 前日価格 × (1 + 変化率)
             predicted_prices.append(round(current_price, 1))
 
         return {
@@ -542,12 +402,15 @@ def predict_stock(code: str):
             "mape": si.get("val_mape"),
             "message": "success"
         }
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error(f"Error predicting: {e}")
+        logger.error(f"Error predicting {code}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="予測処理中にエラーが発生しました。")
 
+
 # ---------------------------------------------------------
-# 4. 非同期学習タスク (v4: 変化率＆Attention)
+# 7. 非同期学習タスク (v4: 変化率＆Attention)
 # ---------------------------------------------------------
 def run_training_task(code: str):
     db = SessionLocal()
@@ -557,7 +420,7 @@ def run_training_task(code: str):
         with engine.connect() as conn:
             df = pd.read_sql(query, con=conn, params={"code": code})
         
-        # 既存DBへの補完ロジック（省略せずに実行）
+        # 既存DBへの補完ロジック
         if df.empty or len(df) < 200:
             ticker = yf.Ticker(f"{code}.T")
             hist = ticker.history(period="3y")
@@ -565,19 +428,16 @@ def run_training_task(code: str):
                 hist = safe_complement_historical_data(code, ticker, hist)
                 
             with engine.connect() as conn:
-                existing = set(pd.read_sql(text("SELECT date FROM stock_prices WHERE code = :code"), conn, params={"code": code})['date'].tolist()) if not df.empty else set()
-            records = []
-            for idx, row in hist.iterrows():
-                ds = idx.strftime('%Y-%m-%d')
-                if ds in existing: continue
-                if pd.isna(row['Open']) or pd.isna(row['Close']) or pd.isna(row['High']) or pd.isna(row['Low']):
-                    continue
-                records.append(StockPrice(
-                    code=code, date=ds, 
-                    open=round(row['Open'], 1), high=round(row['High'], 1), 
-                    low=round(row['Low'], 1), close=round(row['Close'], 1), 
-                    volume=int(row['Volume']) if pd.notna(row['Volume']) else 0
-                ))
+                existing = set(
+                    pd.read_sql(
+                        text("SELECT date FROM stock_prices WHERE code = :code"),
+                        conn, params={"code": code}
+                    )['date'].tolist()
+                ) if not df.empty else set()
+            
+            records = _hist_to_records(code, hist)
+            # 既に存在する日付をフィルタリング
+            records = [r for r in records if r.date not in existing]
             if records:
                 db.bulk_save_objects(records)
                 db.commit()
@@ -607,7 +467,7 @@ def run_training_task(code: str):
         update_status(code, {"status": "training", "progress": 20, "message": f"Attention LSTM学習中... ({len(X)}サンプル)"})
 
         model = StockAttentionLSTM(input_size=FEATURE_COUNT, hidden_size=64, num_layers=2, dropout=0.3)
-        criterion = nn.MSELoss()
+        criterion = torch.nn.MSELoss()
         optimizer = torch.optim.Adam(model.parameters(), lr=0.002)
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5)
 
@@ -640,18 +500,26 @@ def run_training_task(code: str):
                 prog = 20 + int(((ep + 1) / EPOCHS) * 70)
                 update_status(code, {"status": "training", "progress": min(prog, 90), "message": f"Epoch {ep+1} | Val Loss: {vl:.5f}"})
 
-            if wait >= PATIENCE: break
+            if wait >= PATIENCE:
+                break
 
-        if best_state: model.load_state_dict(best_state)
-        torch.save(model.state_dict(), f"lstm_model_{code}.pth")
+        if best_state:
+            model.load_state_dict(best_state)
+        
+        # セキュアなパスでモデル保存
+        model_path = get_model_path(code)
+        scaler_path = get_scaler_path(code)
+        
+        torch.save(model.state_dict(), model_path)
 
         # スケーラー保存 (v4)
         sdata = {
             "feature_names": ["close_return", "volume_norm", "sma5_dev", "rsi", "macd", "n225_return", "usdjpy_return", "sp500_return"],
             "data_min": scaler.data_min_.tolist(), "data_max": scaler.data_max_.tolist(),
-            "input_size": FEATURE_COUNT, "model_version": 4, "val_mape": None # 変化率ベースのためMAPE計算は一旦オフ
+            "input_size": FEATURE_COUNT, "model_version": 4, "val_mape": None
         }
-        with open(f"scaler_{code}.json", "w") as f: json.dump(sdata, f)
+        with open(scaler_path, "w") as f:
+            json.dump(sdata, f)
 
         # 未来5日間予測を生成してステータスに格納
         update_status(code, {"status": "training", "progress": 95, "message": "未来5日間の予測を生成中..."})
@@ -684,25 +552,38 @@ def run_training_task(code: str):
         })
         logger.info(f"[{code}] v4 (Attention & Returns) 学習完了")
     except Exception as e:
-        logger.error(f"Training error: {e}", exc_info=True)
-        update_status(code, {"status": "failed", "progress": 0, "message": f"エラー: {str(e)}"})
+        logger.error(f"Training error for {code}: {e}", exc_info=True)
+        # セキュリティ: 内部エラーの詳細をクライアントに返さない
+        update_status(code, {"status": "failed", "progress": 0, "message": "学習処理中にエラーが発生しました。ログを確認してください。"})
     finally:
         db.close()
 
+
 @app.post("/api/train/{code}")
 def train_stock_model(code: str, background_tasks: BackgroundTasks):
+    code = validate_stock_code(code)
+    
+    # 同一銘柄の重複学習を防止
+    if _is_training(code):
+        return {"code": code, "status": "training", "message": "この銘柄はすでに学習中です。"}
+    
     update_status(code, {"status": "training", "progress": 0, "message": "学習初期化中..."})
     background_tasks.add_task(run_training_task, code)
     return {"code": code, "status": "training"}
 
+
 @app.get("/api/train/status/{code}")
 def get_train_status(code: str):
+    code = validate_stock_code(code)
     return get_status_safe(code)
 
+
+# ---------------------------------------------------------
+# 8. 企業情報 API
+# ---------------------------------------------------------
 @app.get("/api/info/{code}")
 def get_stock_info(code: str):
-    if not code.isdigit() or len(code) != 4:
-        raise HTTPException(status_code=400, detail="銘柄コードは4桁の数字で入力してください")
+    code = validate_stock_code(code)
     try:
         ticker = yf.Ticker(f"{code}.T")
         info = ticker.info
@@ -719,6 +600,8 @@ def get_stock_info(code: str):
             "fiftyTwoWeekLow": info.get("fiftyTwoWeekLow"),
             "previousClose": info.get("previousClose")
         }
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error fetching info for {code}: {e}")
         return {
@@ -733,6 +616,9 @@ def get_stock_info(code: str):
             "previousClose": None
         }
 
+
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    host = os.getenv("HOST", "127.0.0.1")
+    port = int(os.getenv("PORT", "8000"))
+    uvicorn.run(app, host=host, port=port)

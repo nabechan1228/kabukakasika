@@ -1,23 +1,27 @@
+"""
+株価データのバッチ更新スクリプト。
+
+タスクスケジューラ等から定期実行して、既に取得済みの銘柄の株価を最新に更新する。
+
+使い方:
+    python update_db.py
+"""
 import pandas as pd
 import yfinance as yf
-from sqlalchemy import create_engine
-from datetime import datetime, timedelta
+from sqlalchemy import text
+from datetime import datetime
 
-# main.py から最新値補完ヘルパーをインポート
+# 共通モジュールからインポート
+from db import engine
 from main import safe_complement_historical_data
 
-
-# データベースの接続設定（main.pyと同じ）
-DATABASE_URL = "sqlite:///./stock_data.db"
-engine = create_engine(DATABASE_URL)
 
 def update_stock_data():
     print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 株価データのバッチ更新を開始します...")
 
     try:
         # 1. データベースに登録されている銘柄コードを重複なしで取得
-        from sqlalchemy import text as sa_text
-        query_codes = sa_text("SELECT DISTINCT code FROM stock_prices")
+        query_codes = text("SELECT DISTINCT code FROM stock_prices")
         with engine.connect() as conn:
             codes_df = pd.read_sql(query_codes, con=conn)
         
@@ -32,7 +36,6 @@ def update_stock_data():
             print(f"\n--- 銘柄 [{code}] の更新処理 ---")
             
             # 2. データベース内にあるこの銘柄の「最も新しい日付」を取得
-            from sqlalchemy import text
             query_max_date = text("SELECT MAX(date) as max_date FROM stock_prices WHERE code = :code")
             with engine.connect() as conn:
                 max_date_df = pd.read_sql(query_max_date, con=conn, params={"code": code})
@@ -62,7 +65,7 @@ def update_stock_data():
                 print(f"[{code}] 新しいデータはありませんでした。")
                 continue
 
-            # 【補完】最新日のデータが不完全な場合は、多層補完を実行
+            # 最新日のデータが不完全な場合は、多層補完を実行
             hist = safe_complement_historical_data(code, ticker, hist)
 
             # 4. データベースのテーブル定義に合わせてデータを整形
@@ -103,6 +106,7 @@ def update_stock_data():
         print(f"エラーが発生しました: {e}")
 
     print(f"\n[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] バッチ更新が完了しました。")
+
 
 if __name__ == "__main__":
     update_stock_data()
