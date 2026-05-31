@@ -19,7 +19,8 @@ import {
 import StockSearchBox from './StockSearchBox';
 
 // APIベースURL (環境変数から取得、デフォルトはローカル開発用)
-const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+// Windows環境でlocalhostがIPv6 (::1) に解決されて接続エラー(Failed to fetch)になるのを防ぐため、127.0.0.1を使用します
+const API_BASE = import.meta.env.VITE_API_URL || 'http://127.0.0.1:8000';
 
 // =========================================================
 // カスタムツールチップ (金融ターミナル風のプロフェッショナルな情報表示)
