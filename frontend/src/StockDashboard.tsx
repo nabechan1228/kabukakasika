@@ -476,8 +476,8 @@ export default function StockDashboard() {
                 )}
               </div>
 
-              <div style={{ height: '400px', width: '100%' }}>
-                <ResponsiveContainer width="100%" height="100%">
+              <div style={{ height: '400px', width: '100%', position: 'relative' }}>
+                <ResponsiveContainer width="100%" height="100%" minWidth={0}>
                   <ComposedChart data={chartData} barGap="-100%" margin={{ top: 5, right: 20, bottom: 5, left: 0 }}>
                     <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="rgba(255,255,255,0.05)" />
                     <XAxis dataKey="date" tick={{fontSize: 11, fill: '#94a3b8'}} stroke="rgba(255,255,255,0.1)" />
@@ -547,8 +547,8 @@ export default function StockDashboard() {
               {showRSI && (
                 <div style={{ flex: '1', minWidth: '280px', backgroundColor: 'var(--panel-bg)', padding: '10px', borderRadius: '12px', border: '1px solid var(--border-color)' }}>
                   <h3 style={{ fontSize: '13px', margin: '0 0 10px 0', color: 'var(--text-muted)' }}>RSI (14日)</h3>
-                  <div style={{ height: '120px', width: '100%' }}>
-                    <ResponsiveContainer width="100%" height="100%">
+                  <div style={{ height: '120px', width: '100%', position: 'relative' }}>
+                    <ResponsiveContainer width="100%" height="100%" minWidth={0}>
                       <LineChart data={chartData} margin={{ top: 5, right: 10, bottom: 0, left: -20 }}>
                         <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="rgba(255,255,255,0.05)" />
                         <XAxis dataKey="date" hide />
@@ -568,8 +568,8 @@ export default function StockDashboard() {
               {showMACD && (
                 <div style={{ flex: '1', minWidth: '280px', backgroundColor: 'var(--panel-bg)', padding: '10px', borderRadius: '12px', border: '1px solid var(--border-color)' }}>
                   <h3 style={{ fontSize: '13px', margin: '0 0 10px 0', color: 'var(--text-muted)' }}>MACD (12, 26, 9)</h3>
-                  <div style={{ height: '120px', width: '100%' }}>
-                    <ResponsiveContainer width="100%" height="100%">
+                  <div style={{ height: '120px', width: '100%', position: 'relative' }}>
+                    <ResponsiveContainer width="100%" height="100%" minWidth={0}>
                       <ComposedChart data={chartData} margin={{ top: 5, right: 10, bottom: 0, left: -20 }}>
                         <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="rgba(255,255,255,0.05)" />
                         <XAxis dataKey="date" hide />
@@ -588,8 +588,8 @@ export default function StockDashboard() {
             {/* 出来高 */}
             <div style={{ backgroundColor: 'var(--panel-bg)', padding: '10px', borderRadius: '12px', border: '1px solid var(--border-color)' }}>
               <h3 style={{ fontSize: '13px', margin: '0 0 10px 0', color: 'var(--text-muted)' }}>出来高</h3>
-              <div style={{ height: '80px', width: '100%' }}>
-                <ResponsiveContainer width="100%" height="100%">
+              <div style={{ height: '80px', width: '100%', position: 'relative' }}>
+                <ResponsiveContainer width="100%" height="100%" minWidth={0}>
                   <BarChart data={chartData} margin={{ top: 0, right: 20, bottom: 0, left: 0 }}>
                     <XAxis dataKey="date" hide />
                     <Tooltip content={<CustomTooltip />} />
